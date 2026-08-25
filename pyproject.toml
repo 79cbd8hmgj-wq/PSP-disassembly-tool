@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pspdisasm"
+version = "0.1.0"
+description = "PSP executable intelligence and disassembly orchestration toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "PSP Disassembly Toolkit contributors"}]
+dependencies = []
+
+[project.scripts]
+pspdisasm = "pspdisasm.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
