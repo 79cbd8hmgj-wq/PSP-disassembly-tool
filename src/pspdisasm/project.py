@@ -1,0 +1,287 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
+import re
+from typing import Any
+
+import yaml
+
+from .analyzer import analyze_bytes, model_to_dict
+from .disassembler import disassemble_bytes, result_to_dict
+from .elf32 import parse_elf32
+from .errors import DisassemblyError
+from .model import DisassemblyResult, ElfImage, Section
+
+SHF_ALLOC = 0x2
+SHT_NOBITS = 8
+MAX_FLAT_IMAGE_SIZE = 128 * 1024 * 1024
+
+
+@dataclass(slots=True)
+class ProjectArtifacts:
+    base_vram: int
+    target: bytes
+    splat_yaml: str
+    symbols: str
+    executable_json: str
+    disassembly_json: str
+    disassembly: DisassemblyResult
+
+
+@dataclass(slots=True)
+class ProjectResult:
+    output_dir: Path
+    target_path: Path
+    config_path: Path
+    base_vram: int
+    target_size: int
+
+
+def _allocated_sections(elf: ElfImage) -> list[Section]:
+    return sorted(
+        [section for section in elf.sections if section.size > 0 and section.flags & SHF_ALLOC],
+        key=lambda section: (section.addr, section.index),
+    )
+
+
+def _flatten_elf(elf: ElfImage) -> tuple[int, bytes, list[Section]]:
+    sections = _allocated_sections(elf)
+    file_sections = [section for section in sections if section.type != SHT_NOBITS]
+    if not file_sections:
+        raise DisassemblyError("Splat project generation requires allocated file-backed ELF sections.")
+
+    base_vram = min(section.addr for section in sections)
+    end_vram = max(section.addr + section.size for section in file_sections)
+    image_size = end_vram - base_vram
+    if image_size <= 0 or image_size > MAX_FLAT_IMAGE_SIZE:
+        raise DisassemblyError(
+            f"Refusing sparse flat image of 0x{image_size:X} bytes; maximum is 0x{MAX_FLAT_IMAGE_SIZE:X}."
+        )
+
+    image = bytearray(image_size)
+    for section in file_sections:
+        source_end = section.offset + section.size
+        if source_end > len(elf.raw_data):
+            raise DisassemblyError(f"Section {section.name or section.index} extends beyond the ELF file.")
+        dest = section.addr - base_vram
+        image[dest : dest + section.size] = elf.raw_data[section.offset:source_end]
+    return base_vram, bytes(image), sections
+
+
+def _segment_type(section: Section) -> str:
+    known = {
+        ".text": "asm",
+        ".data": "data",
+        ".rodata": "rodata",
+        ".sdata": "sdata",
+        ".sbss": "sbss",
+        ".bss": "bss",
+        ".gcc_except_table": "gcc_except_table",
+        ".eh_frame": "eh_frame",
+    }
+    if section.type == SHT_NOBITS:
+        return "sbss" if section.name == ".sbss" else "bss"
+    if section.name in known:
+        return known[section.name]
+    if section.kind == "executable":
+        return "asm"
+    if section.kind == "writable":
+        return "data"
+    return "rodata"
+
+
+def _build_subsegments(base_vram: int, target_size: int, sections: list[Section]) -> tuple[list[Any], int]:
+    subsegments: list[Any] = []
+    file_sections = [section for section in sections if section.type != SHT_NOBITS]
+    cursor = 0
+    for section in file_sections:
+        start = section.addr - base_vram
+        if start > cursor:
+            subsegments.append([cursor, "bin", f"padding/{cursor:06X}"])
+        seg_type = _segment_type(section)
+        subsegments.append([start, seg_type, f"main/{start:06X}"])
+        cursor = max(cursor, start + section.size)
+    if cursor < target_size:
+        subsegments.append([cursor, "bin", f"padding/{cursor:06X}"])
+
+    bss_size = 0
+    for section in sections:
+        if section.type != SHT_NOBITS:
+            continue
+        seg_type = _segment_type(section)
+        subsegments.append(
+            {"type": seg_type, "vram": section.addr, "name": f"main/{section.addr:08X}"}
+        )
+        bss_size += section.size
+    return subsegments, bss_size
+
+
+def _section_order(sections: list[Section]) -> list[str]:
+    order: list[str] = []
+    for section in sections:
+        name = section.name
+        if not name.startswith("."):
+            continue
+        seg_type = _segment_type(section)
+        if seg_type not in {"asm", "data", "rodata", "sdata", "sbss", "bss", "gcc_except_table", "eh_frame"}:
+            continue
+        canonical = ".text" if seg_type == "asm" else (".rodata" if seg_type == "rodata" else f".{seg_type}")
+        if canonical not in order:
+            order.append(canonical)
+    return order or [".text", ".data", ".rodata", ".bss"]
+
+
+def _render_splat_yaml(source_name: str, target: bytes, base_vram: int, sections: list[Section], gp: int | None) -> str:
+    subsegments, bss_size = _build_subsegments(base_vram, len(target), sections)
+    options: dict[str, Any] = {
+        "basename": Path(source_name).stem or "psp_target",
+        "target_path": "target.bin",
+        "base_path": ".",
+        "platform": "psp",
+        "compiler": "GCC",
+        "endianness": "little",
+        "asm_path": "asm",
+        "src_path": "src",
+        "build_path": "build",
+        "ld_script_path": "linker.ld",
+        "create_asm_dependencies": True,
+        "find_file_boundaries": False,
+        "disassemble_all": True,
+        "make_full_disasm_for_code": True,
+        "named_regs_for_c_funcs": False,
+        "symbol_addrs_path": ["config/symbols.txt"],
+        "undefined_funcs_auto_path": "config/undefined_funcs_auto.txt",
+        "undefined_syms_auto_path": "config/undefined_syms_auto.txt",
+        "section_order": _section_order(sections),
+        "global_vram_start": base_vram,
+        "global_vram_end": max(section.addr + section.size for section in sections),
+    }
+    if gp:
+        options["gp_value"] = gp
+
+    config = {
+        "sha1": hashlib.sha1(target).hexdigest(),
+        "options": options,
+        "segments": [
+            {
+                "name": "main",
+                "type": "code",
+                "start": 0,
+                "vram": base_vram,
+                "bss_size": bss_size,
+                "subalign": None,
+                "subsegments": subsegments,
+            },
+            [len(target)],
+        ],
+    }
+    return yaml.safe_dump(config, sort_keys=False, default_flow_style=False, width=120)
+
+
+def _valid_symbol_name(name: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    if not cleaned or cleaned[0].isdigit():
+        cleaned = "_" + cleaned
+    return cleaned or fallback
+
+
+def _render_symbols(entry: int, result: DisassemblyResult) -> str:
+    lines = ["// Generated by pspdisasm; curate this file as the decompilation progresses."]
+    used_addresses: set[int] = set()
+    if entry:
+        lines.append(f"_start = 0x{entry:08X}; // type:func")
+        used_addresses.add(entry)
+
+    strings_by_address = {record.address: record for record in result.strings}
+    for record in sorted(result.strings, key=lambda item: item.address):
+        if record.address in used_addresses:
+            continue
+        lines.append(f"STR_{record.address:08X} = 0x{record.address:08X}; // type:asciz")
+        used_addresses.add(record.address)
+
+    for function in sorted(result.functions, key=lambda item: (item.address, item.name)):
+        if function.address in used_addresses:
+            continue
+        name = _valid_symbol_name(function.name, f"func_{function.address:08X}")
+        lines.append(f"{name} = 0x{function.address:08X}; // type:func")
+        used_addresses.add(function.address)
+
+    for symbol in sorted(result.symbols, key=lambda item: (item.address, item.name)):
+        if symbol.address in used_addresses or symbol.address in strings_by_address:
+            continue
+        if symbol.kind in {"label", "branchlabel"}:
+            continue
+        name = _valid_symbol_name(symbol.name, f"D_{symbol.address:08X}")
+        lines.append(f"{name} = 0x{symbol.address:08X};")
+        used_addresses.add(symbol.address)
+
+    return "\n".join(lines) + "\n"
+
+
+def build_project_artifacts(data: bytes, source_name: str = "<memory>") -> ProjectArtifacts:
+    model = analyze_bytes(data, source_name)
+    if model.needs_decryption:
+        raise DisassemblyError("Splat project generation requires a decrypted PSP ELF/PRX input.")
+    elf = parse_elf32(data)
+    result = disassemble_bytes(data, source_name)
+    base_vram, target, sections = _flatten_elf(elf)
+    gp = model.module_info.gp_value if model.module_info is not None else None
+    splat_yaml = _render_splat_yaml(source_name, target, base_vram, sections, gp)
+    symbols = _render_symbols(elf.header.entry, result)
+    return ProjectArtifacts(
+        base_vram=base_vram,
+        target=target,
+        splat_yaml=splat_yaml,
+        symbols=symbols,
+        executable_json=json.dumps(model_to_dict(model), indent=2, sort_keys=True) + "\n",
+        disassembly_json=json.dumps(result_to_dict(result), indent=2, sort_keys=True) + "\n",
+        disassembly=result,
+    )
+
+
+def _assembly_filename(name: str, address: int, used: set[str]) -> str:
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", name.lstrip(".")).strip("._")
+    if not base:
+        base = f"section_{address:08X}"
+    filename = f"{base}.s"
+    if filename in used:
+        filename = f"{base}_{address:08X}.s"
+    used.add(filename)
+    return filename
+
+
+def generate_project(source: Path | str, output_dir: Path | str) -> ProjectResult:
+    source_path = Path(source)
+    output = Path(output_dir)
+    artifacts = build_project_artifacts(source_path.read_bytes(), str(source_path))
+
+    for directory in ("config", "metadata", "asm", "asm/nonmatchings", "src", "build", "reports", "assets"):
+        (output / directory).mkdir(parents=True, exist_ok=True)
+
+    (output / "target.bin").write_bytes(artifacts.target)
+    (output / "splat.yaml").write_text(artifacts.splat_yaml, encoding="utf-8")
+    (output / "config" / "symbols.txt").write_text(artifacts.symbols, encoding="utf-8")
+    (output / "config" / "undefined_funcs_auto.txt").write_text("", encoding="utf-8")
+    (output / "config" / "undefined_syms_auto.txt").write_text("", encoding="utf-8")
+    (output / "metadata" / "executable.json").write_text(artifacts.executable_json, encoding="utf-8")
+    (output / "metadata" / "disassembly.json").write_text(artifacts.disassembly_json, encoding="utf-8")
+    normalized = result_to_dict(artifacts.disassembly)
+    for key in ("functions", "symbols", "references", "strings"):
+        payload = json.dumps(normalized[key], indent=2, sort_keys=True) + "\n"
+        (output / "metadata" / f"{key}.json").write_text(payload, encoding="utf-8")
+
+    used: set[str] = set()
+    for section in artifacts.disassembly.assembly_sections:
+        filename = _assembly_filename(section.name, section.address, used)
+        (output / "asm" / filename).write_text(section.assembly, encoding="utf-8")
+
+    return ProjectResult(
+        output_dir=output,
+        target_path=output / "target.bin",
+        config_path=output / "splat.yaml",
+        base_vram=artifacts.base_vram,
+        target_size=len(artifacts.target),
+    )

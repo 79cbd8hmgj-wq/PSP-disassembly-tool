@@ -55,3 +55,17 @@ def test_cli_disasm_rejects_encrypted_psp_container(tmp_path, capsys):
 
     assert code == 2
     assert "decryption" in capsys.readouterr().err.lower()
+
+
+def test_cli_project_generates_splat_workspace(tmp_path):
+    from tests.fixtures import build_allegrex_elf32
+
+    target = tmp_path / "sample.elf"
+    output = tmp_path / "project"
+    target.write_bytes(build_allegrex_elf32())
+
+    code = main(["project", str(target), str(output)])
+
+    assert code == 0
+    assert (output / "splat.yaml").exists()
+    assert (output / "config" / "symbols.txt").exists()

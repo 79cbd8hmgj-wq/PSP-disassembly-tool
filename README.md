@@ -2,9 +2,9 @@
 
 `pspdisasm` is a PSP-focused executable-analysis and decompilation-orchestration toolkit. It adds PSP container/PRX intelligence around the Decompollaborate ecosystem instead of merging upstream projects into one fork.
 
-## Current status: Phase 2
+## Current status: Phase 3
 
-The project now covers two layers:
+The project now covers three layers:
 
 ### Phase 1 — PSP executable intelligence
 
@@ -134,7 +134,7 @@ The architecture keeps each source focused on what it already does well:
 
 - **Rabbitizer** — Allegrex/VFPU instruction decoding.
 - **spimdisasm** — MIPS/Allegrex function, symbol, and reference analysis.
-- **Splat** — PSP-aware project splitting/configuration and decomp project generation in Phase 3.
+- **Splat** — PSP-aware project splitting/configuration conventions used by Phase 3 project generation.
 - **m2c** — optional approximate assembly-to-C backend in a later phase; kept out-of-process because of GPLv3.
 - **asm-differ** — recompilation/matching workflow in a later phase.
 
@@ -147,30 +147,8 @@ The architecture keeps each source focused on what it already does well:
 - No `PT_PRXRELOC2` decompression/application yet.
 - No NID-to-name database yet.
 - No ISO/CSO filesystem extraction yet.
-- No Splat project generation yet.
 - No m2c or asm-differ command integration yet.
 - No high-level C recovery/type reconstruction yet.
-
-## Phase 3 handoff
-
-Phase 3 will turn Phase 1 + Phase 2 results into a reproducible Splat PSP project. Planned outputs include:
-
-```text
-project/
-├── splat.yaml
-├── config/
-│   ├── symbols.txt
-│   └── undefined_syms.txt
-├── asm/
-├── src/
-├── metadata/
-│   ├── executable.json
-│   ├── functions.json
-│   └── references.json
-└── reports/
-```
-
-The Phase 2 normalized model is deliberately engine-independent so Splat generation does not have to understand spimdisasm internal classes.
 
 ## Development
 
@@ -181,3 +159,38 @@ PYTHONPATH=src python -m pytest -q
 ```
 
 The tests use synthetic PSP-like ELF/PRX structures. No commercial game data is included.
+
+## Phase 3: Splat project generation
+
+Generate a Splat-ready PSP decompilation workspace from a decrypted ELF/PRX:
+
+```bash
+pspdisasm project decrypted_EBOOT.BIN game_decomp
+```
+
+The generated project contains:
+
+```text
+game_decomp/
+├── splat.yaml
+├── target.bin
+├── config/
+│   ├── symbols.txt
+│   ├── undefined_funcs_auto.txt
+│   └── undefined_syms_auto.txt
+├── metadata/
+│   ├── executable.json
+│   ├── disassembly.json
+│   ├── functions.json
+│   ├── symbols.json
+│   ├── references.json
+│   └── strings.json
+├── asm/
+│   └── nonmatchings/
+├── src/
+├── build/
+├── assets/
+└── reports/
+```
+
+Phase 3 follows the supplied Splat 0.50.0 PSP conventions: `platform: psp`, little-endian MIPS, Rabbitizer's `R4000ALLEGREX` path, a `code` segment containing `asm`/data/rodata/BSS subsegments, and `symbol_addrs.txt`-style symbol declarations. The original ELF metadata is not fed to Splat as code; allocated ELF sections are normalized into a flat VRAM-linear `target.bin`, following Splat's ELF quickstart model.

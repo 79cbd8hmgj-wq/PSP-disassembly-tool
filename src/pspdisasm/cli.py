@@ -11,6 +11,7 @@ from .analyzer import analyze_file, model_to_dict
 from .disassembler import disassemble_file, result_to_dict
 from .errors import DisassemblyError, EngineUnavailableError, ParseError
 from .model import DisassemblyResult, ExecutableModel
+from .project import generate_project
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -25,6 +26,10 @@ def _parser() -> argparse.ArgumentParser:
     disasm.add_argument("input", type=Path)
     disasm.add_argument("--json", metavar="PATH", help="Write normalized disassembly JSON; use '-' for stdout")
     disasm.add_argument("--asm-dir", type=Path, metavar="DIR", help="Write one assembly file per executable section")
+
+    project = sub.add_parser("project", help="Generate a Splat PSP decompilation workspace")
+    project.add_argument("input", type=Path)
+    project.add_argument("output", type=Path)
     return parser
 
 
@@ -127,6 +132,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _write_assembly(result, args.asm_dir)
             if not _write_json(result_to_dict(result), args.json):
                 print(_disasm_summary(result))
+            return 0
+
+        if args.command == "project":
+            result = generate_project(args.input, args.output)
+            print(f"Project: {result.output_dir}")
+            print(f"Base VRAM: 0x{result.base_vram:08X}")
+            print(f"Target size: 0x{result.target_size:X}")
+            print(f"Splat config: {result.config_path}")
             return 0
     except (OSError, ParseError, EngineUnavailableError, DisassemblyError) as exc:
         print(f"pspdisasm: {exc}", file=sys.stderr)
