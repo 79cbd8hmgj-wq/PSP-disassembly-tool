@@ -186,3 +186,79 @@ def build_psp_container_header() -> bytes:
     blob[0x7C] = 9
     struct.pack_into("<I", blob, 0xD0, 0xD91611F0)
     return bytes(blob)
+
+
+def build_allegrex_elf32() -> bytes:
+    """Synthetic PSP-like ELF with two functions and referenced rodata."""
+    base = 0x08800000
+    text_words = [
+        0x00801016,  # clz v0, a0 (Allegrex-only)
+        0x0E20000A,  # jal 0x08800028
+        0x00000000,  # nop
+        0x3C080880,  # lui t0, 0x0880
+        0x25080100,  # addiu t0, t0, 0x100 -> 0x08800100
+        0x10800001,  # beq a0, zero, 0x0880001C
+        0xD0060000,  # vzero.s S000 (VFPU)
+        0x03E00008,  # jr ra
+        0x00000000,  # nop
+        0x00000000,  # padding
+        0x24020001,  # addiu v0, zero, 1
+        0x03E00008,  # jr ra
+        0x00000000,  # nop
+    ]
+    text = b"".join(struct.pack("<I", word) for word in text_words)
+    rodata = b"Hello PSP!\x00" + b"\x00" * (0x20 - len(b"Hello PSP!\x00"))
+
+    names = b"\x00.text\x00.rodata\x00.shstrtab\x00"
+    name_offsets = {name: names.index(name.encode()) for name in (".text", ".rodata", ".shstrtab")}
+
+    phoff = 0x34
+    text_off = 0x100
+    rodata_off = 0x200
+    shstr_off = 0x240
+    shoff = 0x280
+    shnum = 4
+    total = shoff + shnum * 0x28
+    blob = bytearray(total)
+
+    ident = bytearray(16)
+    ident[0:4] = b"\x7fELF"
+    ident[4] = 1
+    ident[5] = 1
+    ident[6] = 1
+    blob[:16] = ident
+    struct.pack_into(
+        "<HHIIIIIHHHHHH",
+        blob,
+        0x10,
+        2,
+        8,
+        1,
+        base,
+        phoff,
+        shoff,
+        0x10A23001,
+        0x34,
+        0x20,
+        2,
+        0x28,
+        shnum,
+        3,
+    )
+    struct.pack_into("<8I", blob, phoff, 1, text_off, base, base, len(text), len(text), 5, 0x10)
+    struct.pack_into("<8I", blob, phoff + 0x20, 1, rodata_off, base + 0x100, base + 0x100, len(rodata), len(rodata), 4, 0x10)
+
+    blob[text_off:text_off + len(text)] = text
+    blob[rodata_off:rodata_off + len(rodata)] = rodata
+    blob[shstr_off:shstr_off + len(names)] = names
+
+    sections = [
+        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        (name_offsets[".text"], 1, 0x6, base, text_off, len(text), 0, 0, 4, 0),
+        (name_offsets[".rodata"], 1, 0x2, base + 0x100, rodata_off, len(rodata), 0, 0, 4, 0),
+        (name_offsets[".shstrtab"], 3, 0, 0, shstr_off, len(names), 0, 0, 1, 0),
+    ]
+    for i, section in enumerate(sections):
+        struct.pack_into("<10I", blob, shoff + i * 0x28, *section)
+
+    return bytes(blob)

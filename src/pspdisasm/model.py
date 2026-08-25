@@ -174,3 +174,75 @@ class ExecutableModel:
     exports: list[LibraryExport] = field(default_factory=list)
     relocations: list[Relocation] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class EngineInfo:
+    name: str
+    version: str
+
+
+@dataclass(slots=True)
+class InstructionRecord:
+    address: int
+    word: int
+    text: str
+    valid: bool
+    implemented: bool
+
+
+@dataclass(slots=True)
+class FunctionRecord:
+    name: str
+    address: int
+    size: int
+    section: str
+    assembly: str
+    instruction_count: int
+    instructions: list[InstructionRecord] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SymbolRecord:
+    name: str
+    address: int
+    section: str | None
+    kind: str
+    source: str
+
+
+@dataclass(slots=True)
+class ReferenceRecord:
+    source_address: int
+    target_address: int
+    kind: str
+    source_function: str | None
+    target_section: str | None
+
+
+@dataclass(slots=True)
+class StringRecord:
+    address: int
+    value: str
+    section: str
+    referenced_by: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AssemblySection:
+    name: str
+    address: int
+    size: int
+    assembly: str
+
+
+@dataclass(slots=True)
+class DisassemblyResult:
+    source_name: str
+    engines: list[EngineInfo] = field(default_factory=list)
+    functions: list[FunctionRecord] = field(default_factory=list)
+    symbols: list[SymbolRecord] = field(default_factory=list)
+    references: list[ReferenceRecord] = field(default_factory=list)
+    strings: list[StringRecord] = field(default_factory=list)
+    assembly_sections: list[AssemblySection] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)

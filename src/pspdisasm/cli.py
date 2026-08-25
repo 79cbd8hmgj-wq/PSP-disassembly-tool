@@ -2,21 +2,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from .analyzer import analyze_file, model_to_dict
-from .errors import ParseError
-from .model import ExecutableModel
+from .disassembler import disassemble_file, result_to_dict
+from .errors import DisassemblyError, EngineUnavailableError, ParseError
+from .model import DisassemblyResult, ExecutableModel
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pspdisasm", description="PSP executable intelligence and disassembly toolkit")
     sub = parser.add_subparsers(dest="command", required=True)
+
     analyze = sub.add_parser("analyze", help="Analyze PSP ELF/PRX/~PSP metadata")
     analyze.add_argument("input", type=Path)
     analyze.add_argument("--json", metavar="PATH", help="Write normalized JSON; use '-' for stdout")
+
+    disasm = sub.add_parser("disasm", help="Disassemble decrypted PSP ELF/PRX Allegrex code")
+    disasm.add_argument("input", type=Path)
+    disasm.add_argument("--json", metavar="PATH", help="Write normalized disassembly JSON; use '-' for stdout")
+    disasm.add_argument("--asm-dir", type=Path, metavar="DIR", help="Write one assembly file per executable section")
     return parser
 
 
@@ -57,22 +65,70 @@ def _summary(model: ExecutableModel) -> str:
     return "\n".join(lines)
 
 
+def _disasm_summary(result: DisassemblyResult) -> str:
+    lines = [
+        f"Input: {result.source_name}",
+        "Engines: " + ", ".join(f"{engine.name} {engine.version}" for engine in result.engines),
+        f"Functions: {len(result.functions)}",
+        f"Symbols: {len(result.symbols)}",
+        f"References: {len(result.references)}",
+        f"Strings: {len(result.strings)}",
+        f"Executable sections: {len(result.assembly_sections)}",
+    ]
+    if result.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in result.warnings)
+    return "\n".join(lines)
+
+
+def _write_json(payload: dict, output: str | None) -> bool:
+    if not output:
+        return False
+    encoded = json.dumps(payload, indent=2, sort_keys=True)
+    if output == "-":
+        print(encoded)
+    else:
+        Path(output).write_text(encoded + "\n", encoding="utf-8")
+    return True
+
+
+def _assembly_filename(name: str, address: int, used: set[str]) -> str:
+    base = name.lstrip(".")
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._")
+    if not base:
+        base = f"section_{address:08X}"
+    filename = f"{base}.s"
+    if filename in used:
+        filename = f"{base}_{address:08X}.s"
+    used.add(filename)
+    return filename
+
+
+def _write_assembly(result: DisassemblyResult, directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    used: set[str] = set()
+    for section in result.assembly_sections:
+        filename = _assembly_filename(section.name, section.address, used)
+        (directory / filename).write_text(section.assembly, encoding="utf-8")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command != "analyze":
-        return 2
     try:
-        model = analyze_file(args.input)
-    except (OSError, ParseError) as exc:
+        if args.command == "analyze":
+            model = analyze_file(args.input)
+            if not _write_json(model_to_dict(model), args.json):
+                print(_summary(model))
+            return 0
+
+        if args.command == "disasm":
+            result = disassemble_file(args.input)
+            if args.asm_dir is not None:
+                _write_assembly(result, args.asm_dir)
+            if not _write_json(result_to_dict(result), args.json):
+                print(_disasm_summary(result))
+            return 0
+    except (OSError, ParseError, EngineUnavailableError, DisassemblyError) as exc:
         print(f"pspdisasm: {exc}", file=sys.stderr)
         return 2
-
-    if args.json:
-        payload = json.dumps(model_to_dict(model), indent=2, sort_keys=True)
-        if args.json == "-":
-            print(payload)
-        else:
-            Path(args.json).write_text(payload + "\n", encoding="utf-8")
-    else:
-        print(_summary(model))
-    return 0
+    return 2
