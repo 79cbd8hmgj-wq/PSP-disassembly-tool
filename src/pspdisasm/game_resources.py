@@ -461,6 +461,7 @@ def analyze_game_resources(
                             entries = entries[:MAX_CONTAINER_ENTRIES]
 
                         accepted_for_container = 0
+                        extracted_bytes = 0
                         for entry in entries:
                             # Inner paths are an integrity boundary and are therefore
                             # validated before any parser-local range/error isolation.
@@ -469,6 +470,15 @@ def analyze_game_resources(
                                 warning = (
                                     f"Container entry {entry.path} from {record.path} is out of bounds: "
                                     f"offset={entry.offset}, size={entry.size}, parent_size={record.size}"
+                                )
+                                inspection_warnings.append(warning)
+                                warnings.append(warning)
+                                global_warnings.append(warning)
+                                continue
+                            if extracted_bytes + entry.size > record.size:
+                                warning = (
+                                    f"Container entry {entry.path} from {record.path} exceeds the "
+                                    f"per-container extraction budget of {record.size} bytes"
                                 )
                                 inspection_warnings.append(warning)
                                 warnings.append(warning)
@@ -513,6 +523,7 @@ def analyze_game_resources(
                                 )
                             )
                             accepted_for_container += 1
+                            extracted_bytes += entry.size
 
                         inspection_records.append(
                             ContainerInspectionRecord(
