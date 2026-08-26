@@ -2,9 +2,9 @@ import io
 import json
 import struct
 
-import pycdlib
-
 from pspdisasm.disc import scan_game_disc
+
+import pycdlib
 
 
 SFO_HEADER = struct.Struct("<4sIIII")
