@@ -110,3 +110,27 @@ def test_cso_reader_rejects_non_monotonic_indexes(tmp_path):
 
     with pytest.raises(ParseError, match="monotonic"):
         CsoReader(path)
+
+
+def test_cso_v1_ignores_unreliable_header_size_field(tmp_path):
+    image = bytearray(build_cso([b"A" * 2048]))
+    struct.pack_into("<I", image, 4, 0x12345678)
+    path = tmp_path / "legacy-header.cso"
+    path.write_bytes(image)
+
+    with CsoReader(path) as reader:
+        assert reader.read() == b"A" * 2048
+
+
+def test_cso_reader_rejects_plain_block_shorter_than_declared_span(tmp_path):
+    image = bytearray(build_cso([b"A" * 2048]))
+    first_index_offset = HEADER.size
+    first = struct.unpack_from("<I", image, first_index_offset)[0]
+    data_offset = first & 0x7FFFFFFF
+    struct.pack_into("<I", image, first_index_offset + 4, data_offset + 2047)
+    path = tmp_path / "short-plain.cso"
+    path.write_bytes(image)
+
+    with CsoReader(path) as reader:
+        with pytest.raises(ParseError, match="uncompressed block"):
+            reader.read()
