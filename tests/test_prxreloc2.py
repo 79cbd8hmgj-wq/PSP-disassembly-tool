@@ -141,3 +141,22 @@ def test_decode_prxreloc2_maps_supported_compact_types(
     assert len(relocations) == 1
     assert relocations[0].type == normalized_type
     assert relocations[0].type_name == type_name
+
+
+def test_decode_prxreloc2_hi16_explicit_signed_low_half():
+    stream = bytes.fromhex(
+        "00 00 02 01"
+        "03 00 11"     # relocation flag 0x11 => explicit signed low-half follows
+        "02 04"        # compact type 4 => R_MIPS_HI16 at type index 1
+        "01 00"
+        "4E 00 FC FF"  # compact +4 source delta, explicit low half -4
+    )
+    data, elf = _reloc2_elf(stream)
+
+    relocations = decode_prxreloc2(data, elf, 2)
+
+    assert len(relocations) == 1
+    assert relocations[0].type == 5
+    assert relocations[0].type_name == "R_MIPS_HI16"
+    assert relocations[0].addend == -4
+    assert relocations[0].encoding_flags == 0x11
