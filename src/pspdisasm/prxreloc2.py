@@ -101,6 +101,11 @@ def _signed_compact_delta(command: int, shift: int) -> int:
     return signed >> shift
 
 
+def _signed_extended_delta(command: int, shift: int, low_half: int) -> int:
+    high = _signed_compact_delta(command, shift)
+    return (high << 16) | low_half
+
+
 def decode_prxreloc2(
     data: bytes,
     elf: ElfImage,
@@ -186,6 +191,9 @@ def decode_prxreloc2(
         offset_mode = flag & 0x06
         if offset_mode == 0x00:
             relocation_base += _signed_compact_delta(command, payload_shift)
+        elif offset_mode == 0x02:
+            low_half = reader.read_u16("extended relocation delta")
+            relocation_base += _signed_extended_delta(command, payload_shift, low_half)
         else:
             raise ParseError(
                 f"unsupported PT_PRXRELOC2 relocation offset mode 0x{offset_mode:02X}"
