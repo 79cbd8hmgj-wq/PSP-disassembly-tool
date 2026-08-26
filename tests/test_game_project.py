@@ -5,10 +5,12 @@ import json
 import struct
 
 import pycdlib
+import pytest
 
 import pspdisasm.game_project as game_project
+from pspdisasm import generate_game_project
+from pspdisasm.disc import GameDiscManifest, GameModuleRecord
 from pspdisasm.errors import DisassemblyError
-from pspdisasm.game_project import generate_game_project
 from pspdisasm.linker import ModuleAnalysisInput
 from pspdisasm.model import ModuleLinkAnalysis
 from tests.fixtures import build_allegrex_elf32, build_psp_container_header
@@ -179,3 +181,31 @@ def test_generate_game_project_isolates_secondary_disassembly_failure(tmp_path, 
     assert broken["status"] == "failed"
     assert broken["project_path"] is None
     assert any("synthetic failure" in warning for warning in broken["warnings"])
+
+
+def test_generate_game_project_rejects_unsafe_mirrored_project_path(tmp_path, monkeypatch):
+    output = tmp_path / "unsafe_decomp"
+    extracted = output / "modules" / "safe.bin"
+    extracted.parent.mkdir(parents=True)
+    payload = build_allegrex_elf32()
+    extracted.write_bytes(payload)
+
+    manifest = GameDiscManifest(
+        source_name="synthetic.iso",
+        image_format="iso",
+        title="Synthetic PSP Game",
+        boot_path="../escape",
+        modules=[
+            GameModuleRecord(
+                path="../escape",
+                size=len(payload),
+                executable_kind="elf",
+                output_path="modules/safe.bin",
+                is_boot=True,
+            )
+        ],
+    )
+    monkeypatch.setattr(game_project, "scan_game_disc", lambda source, output_dir: manifest)
+
+    with pytest.raises(ValueError, match="Unsafe game project path"):
+        generate_game_project("synthetic.iso", output)
