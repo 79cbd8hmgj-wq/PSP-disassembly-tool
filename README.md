@@ -2,9 +2,9 @@
 
 `pspdisasm` is a PSP-focused executable-analysis, disassembly, decompilation, and matching toolkit. It adds PSP-specific container/PRX intelligence around the Decompollaborate ecosystem instead of merging the upstream projects into one fork.
 
-## Current status: Phase 5
+## Current status: Phase 6A
 
-The toolkit currently covers five layers:
+The toolkit currently covers the original five workflow layers plus the first advanced-analysis layer:
 
 ### Phase 1 — PSP executable intelligence
 
@@ -43,6 +43,17 @@ The toolkit currently covers five layers:
 - Normalize raw asm-differ score data into a 0–100 similarity percentage plus matching/changed/added/removed row counts.
 - Persist the synthesized reference object, normalized matching metadata, and the complete raw asm-differ JSON report.
 - Preserve previous successful reports when a build or backend invocation fails.
+
+### Phase 6A — advanced program analysis
+
+- Normalize direct calls and spimdisasm-resolved indirect `jalr` calls into a function-to-function call graph.
+- Expose accepted spimdisasm jump-table discoveries without inventing tables from arbitrary pointer-looking data.
+- Decode consecutive little-endian jump-table entries only while they resolve to executable mapped sections.
+- Assign deterministic `0.00`–`1.00` function-boundary confidence scores with human-readable evidence.
+- Reward ELF-entry, PSP import/export seeds, incoming calls, and valid/implemented instruction bodies while penalizing invalid or unimplemented instructions.
+- Emit standalone call-graph, jump-table, confidence, and combined advanced-analysis JSON reports during project generation.
+
+Phase 6B will build on this normalized layer with NID-to-name databases, cross-module relationships, symbol propagation, richer data typing, and later asset discovery.
 
 ## Installation
 
@@ -100,7 +111,11 @@ game_decomp/
 │   ├── functions.json
 │   ├── symbols.json
 │   ├── references.json
-│   └── strings.json
+│   ├── strings.json
+│   ├── advanced.json
+│   ├── callgraph.json
+│   ├── jump_tables.json
+│   └── function_confidence.json
 ├── asm/
 │   └── nonmatchings/
 ├── src/
@@ -108,6 +123,8 @@ game_decomp/
 ├── assets/
 └── reports/
 ```
+
+Phase 6A runs automatically during project generation. The same pure analysis entry point is also available to Python callers as `pspdisasm.analyze_advanced(model, disassembly)`.
 
 ### Generate an assisted C draft
 
@@ -189,6 +206,17 @@ The normalized metadata records:
 
 An asm-differ raw score of zero maps to `100.00%` similarity. Because asm-differ penalties can exceed its deletion-based `max_score`, normalized similarity is clamped to the 0–100 range while the original raw values remain preserved.
 
+## Phase 6A artifacts
+
+Project generation now emits:
+
+- `metadata/advanced.json` — complete normalized advanced-analysis result;
+- `metadata/callgraph.json` — direct and resolved-indirect function edges;
+- `metadata/jump_tables.json` — accepted table address, source jump site, owning function, and executable targets;
+- `metadata/function_confidence.json` — score and evidence for each discovered function boundary.
+
+The advanced layer consumes only normalized PSP executable/disassembly models. It does not import spimdisasm or Rabbitizer directly, keeping upstream-engine access isolated inside the Phase 2 adapter.
+
 ## Reference-object design and limitation
 
 Phase 5 builds the reference `.o` directly from the exact instruction words already stored in `metadata/functions.json`. The generated object is ELF32 little-endian `ET_REL`/`EM_MIPS` and contains `.text`, `.symtab`, `.strtab`, and `.shstrtab` with a global function symbol.
@@ -227,4 +255,4 @@ Run the test suite with the Phase 2 analysis dependencies available:
 PYTHONPATH=src python -m pytest -q
 ```
 
-The repository tests use synthetic PSP-like ELF/PRX structures. No commercial game data is included.
+The repository test workflow installs the analysis extra and runs the complete synthetic suite on pushes and pull requests. The tests use synthetic PSP-like ELF/PRX structures; no commercial game data is included.
