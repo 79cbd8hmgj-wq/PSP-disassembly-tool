@@ -149,8 +149,8 @@ def test_scans_unaligned_signatures_but_not_executable_or_nobits_sections():
 
 
 def test_validated_outer_asset_suppresses_overlapping_nested_signature():
-    nested = PNG
-    body = b"WAVEJUNK" + nested
+    junk = b"JUNK" + len(PNG).to_bytes(4, "little") + PNG
+    body = b"WAVE" + junk
     riff = b"RIFF" + len(body).to_bytes(4, "little") + body
     result = _analyze(riff)
     assert len(result.assets) == 1
