@@ -2,7 +2,7 @@
 
 `pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, matching, and whole-game resource-analysis toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of combining upstream projects into one fork.
 
-## Current status: Phase 7D
+## Current status: Phase 7E
 
 The implemented pipeline now covers:
 
@@ -16,6 +16,7 @@ The implemented pipeline now covers:
 8. Automatic game-wide module analysis/linking.
 9. Whole-disc resource extraction, classification, and conservative embedded-resource discovery.
 10. Deterministic unknown-container fingerprinting, family grouping, and safe parser-driven entry extraction.
+11. Bounded PSP `PT_PRXRELOC2` decoding with normalized relocation provenance and explicit relocation-word application primitives.
 
 ## Implemented phases
 
@@ -24,7 +25,7 @@ The implemented pipeline now covers:
 - Detect raw ELF32 and `~PSP` inputs.
 - Parse ELF32 headers, program headers, sections, and PSP PRX type `0xFFA0`.
 - Parse `sceModuleInfo`, import/export libraries, unresolved NIDs, and standard PSP/MIPS relocations.
-- Detect compressed `PT_PRXRELOC2` streams without pretending to decode them.
+- Recognize PSP `PT_PRXRELOC2` segments; Phase 7E now supplies the bounded decoder and normal PRX-analysis integration.
 - Parse the outer `~PSP` header and stop safely at the encryption/decompression boundary.
 
 ### Phase 2 — Allegrex/VFPU disassembly
@@ -139,6 +140,19 @@ See [`docs/phase7c-game-resources.md`](docs/phase7c-game-resources.md) for the d
 
 See [`docs/phase7d-container-intelligence.md`](docs/phase7d-container-intelligence.md) for the parser API, report schemas, and safety boundaries.
 
+### Phase 7E — PSP `PT_PRXRELOC2` decoding
+
+- Decode bounded PSP Type-B compressed relocation streams instead of merely flagging them.
+- Support compact, extended signed-delta, and absolute relocation-offset encodings plus compact/absolute state-base encodings.
+- Normalize compact relocation types to `R_MIPS_NONE`, `R_MIPS_16`, `R_MIPS_32`, `R_MIPS_26`, `R_MIPS_HI16`, `R_MIPS_LO16`, `R_MIPS_X_J26`, and `R_MIPS_X_JAL26`.
+- Preserve source/target `PT_LOAD` indices, stream offsets, encoding flags, and resolved/unresolved HI16 addend state on normalized relocations.
+- Keep ambiguous HI16 reuse state explicit as unresolved rather than inventing an emulator-derived low half.
+- Isolate malformed Type-B segments as deterministic warnings while preserving valid Type-A relocations and other PRX metadata.
+- Expose `apply_psp_relocation_word()` as a pure transform with caller-supplied target base; the analyzer does not silently rebase or mutate executable bytes.
+- Reject truncated streams, invalid lookup indices, invalid segment references, out-of-range source words, and excessive decoded relocation counts.
+
+See [`docs/phase7e-prxreloc2.md`](docs/phase7e-prxreloc2.md) for the decoder grammar, relocation behavior, safety boundaries, and reference boundary.
+
 ## Installation
 
 Core parsing:
@@ -192,7 +206,7 @@ pspdisasm game-project game.iso game_decomp
 pspdisasm game-project game.cso game_decomp --nid-db psp_nids.csv
 ```
 
-`game-project` automatically runs Phase 7A, Phase 7B, Phase 7C, and the built-in Phase 7D unknown-container profiling pass. Trusted title-specific parsers can additionally be supplied through the Python API.
+`game-project` automatically runs Phase 7A, Phase 7B, Phase 7C, and the built-in Phase 7D unknown-container profiling pass. Phase 7E is consumed automatically by every PRX analysis performed during the workflow. Trusted title-specific parsers can additionally be supplied through the Python API.
 
 Typical output:
 
@@ -364,6 +378,8 @@ from pspdisasm import (
     analyze_data_types,
     analyze_file,
     analyze_game_resources,
+    apply_psp_relocation_word,
+    decode_prxreloc2,
     decompile_project_function,
     disassemble_bytes,
     disassemble_file,
@@ -379,7 +395,7 @@ from pspdisasm import (
 )
 ```
 
-`generate_game_project()` is the high-level whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values.
+`generate_game_project()` is the high-level whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values. `decode_prxreloc2()` and `apply_psp_relocation_word()` expose the Phase 7E compressed-relocation decoder and explicit pure word transform.
 
 ## Resource-analysis safety model
 
@@ -403,14 +419,15 @@ A signature or extension alone does not authorize arbitrary carving.
 - **asm-differ** — original-vs-recompiled matching backend, kept out-of-process.
 - **pycdlib** — optional ISO9660 traversal dependency; LGPL source is not copied into the MIT core.
 - **maxcso** — CISO/CSO behavior/reference source for the clean-room reader.
-- **PPSSPP** — PSP disc/media/container behavioral reference; GPL code is not copied into the core.
+- **PPSSPP** — PSP disc/media/container/relocation behavioral reference; GPL code is not copied into the core.
 - **PSPLibDoc-compatible data** — optional external NID naming input; no NID database is bundled.
 
 ## Current limitations
 
 - No PSP cryptographic decryption.
 - No GZIP/KL4E/2RLZ decompression of encrypted `~PSP` bodies.
-- No `PT_PRXRELOC2` decompression/application yet.
+- No automatic runtime load-address selection or silent pre-disassembly relocation application; Phase 7E deliberately keeps relocation application explicit.
+- Ambiguous `PT_PRXRELOC2` HI16 reuse state remains unresolved unless the caller supplies an explicit low half.
 - No bundled PSP NID database.
 - No direct PSPLibDoc XML or PPSSPP source parser.
 - No universal parser for proprietary game archives/containers; Phase 7D requires an evidence-backed supplied parser for title-specific decoding.
@@ -432,4 +449,4 @@ python -m pip install -e '.[analysis,disc]' pytest
 PYTHONPATH=src python -m pytest -q
 ```
 
-The GitHub Actions workflow runs the same implemented dependency set on pushes and pull requests. Tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, CSO, resource, and container structures; no commercial game data is included.
+The GitHub Actions workflow runs the same implemented dependency set on pushes and pull requests. Tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, CSO, resource, relocation, and container structures; no commercial game data is included.
