@@ -21,6 +21,7 @@ SHT_NOBITS = 8
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _GIM_SIGNATURE = b"MIG.00.1PSP"
 _ATRAC_CODEC_TAGS = {0x0270, 0x0271}
+_PSMF_VERSIONS = {b"0012", b"0013", b"0014", b"0015"}
 
 
 def _record(
@@ -247,17 +248,37 @@ def _detect_gim(data: bytes, section: Section, start: int) -> AssetRecord | None
 def _detect_psmf(data: bytes, section: Section, start: int) -> AssetRecord | None:
     if start + 16 > len(data) or data[start : start + 4] != b"PSMF":
         return None
+
+    version_bytes = data[start + 4 : start + 8]
+    if version_bytes not in _PSMF_VERSIONS:
+        return None
+
+    stream_offset = int.from_bytes(data[start + 8 : start + 12], "big")
+    stream_size = int.from_bytes(data[start + 12 : start + 16], "big")
+    if stream_offset == 0 or stream_offset & 0x7FF or stream_size <= 0:
+        return None
+
+    total_size = stream_offset + stream_size
+    bounded = start + total_size <= len(data)
+    evidence = ["psmf_signature", "psmf_version", "psmf_stream_offset", "psmf_stream_size"]
+    if bounded:
+        evidence.append("bounded_declared_extent")
+
     return _record(
         section,
         start,
         format="pmf",
         kind="video",
-        size=None,
-        confidence=0.90,
-        evidence=["psmf_signature", "minimum_header_available"],
-        extractable=False,
+        size=total_size if bounded else None,
+        confidence=1.0 if bounded else 0.95,
+        evidence=evidence,
+        extractable=bounded,
         extension="pmf",
-        metadata={},
+        metadata={
+            "version": version_bytes.decode("ascii"),
+            "stream_offset": stream_offset,
+            "stream_size": stream_size,
+        },
     )
 
 
