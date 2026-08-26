@@ -114,10 +114,13 @@ def generate_game_project(
             failed_count += 1
             continue
 
-        extracted: Path | None = None
+        # Containment failures are game-level integrity errors, not ordinary
+        # module-analysis failures. Validate both roots before entering the
+        # per-module isolation boundary so traversal/symlink escapes are fatal.
+        extracted = _safe_relative_target(output, candidate.output_path)
+        project_root = _safe_relative_target(output / "projects", candidate.path)
         model = None
         try:
-            extracted = _safe_relative_target(output, candidate.output_path)
             model = analyze_file(extracted)
             name = _module_name(model)
             if model.needs_decryption:
@@ -136,7 +139,6 @@ def generate_game_project(
                 continue
 
             disassembly = disassemble_file(extracted)
-            project_root = _safe_relative_target(output / "projects", candidate.path)
             generate_project(extracted, project_root, nid_databases=database_paths)
             module_records.append(
                 GameModuleAnalysisRecord(
@@ -162,9 +164,7 @@ def generate_game_project(
             module_records.append(
                 GameModuleAnalysisRecord(
                     path=candidate.path,
-                    extracted_path=(
-                        _relative_display(extracted, output) if extracted is not None else candidate.output_path
-                    ),
+                    extracted_path=_relative_display(extracted, output),
                     executable_kind=candidate.executable_kind,
                     is_boot=candidate.is_boot,
                     status="failed",
