@@ -130,3 +130,13 @@ def test_invalid_kind_is_rejected(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="kind"):
         load_nid_databases([path])
+
+
+def test_package_exports_phase6b_api_and_version() -> None:
+    import pspdisasm
+    from pspdisasm.linker import link_modules
+    from pspdisasm.nids import load_nid_databases
+
+    assert pspdisasm.load_nid_databases is load_nid_databases
+    assert pspdisasm.link_modules is link_modules
+    assert pspdisasm.__version__ == "0.7.0"
