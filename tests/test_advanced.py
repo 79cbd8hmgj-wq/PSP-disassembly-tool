@@ -139,3 +139,12 @@ def test_advanced_preserves_normalized_jump_tables() -> None:
     result = advanced_module.analyze_advanced(_model(), disassembly)
 
     assert result.jump_tables == [jump_table]
+
+
+def test_package_exports_phase6a_api_and_version() -> None:
+    import pspdisasm
+
+    advanced_module = importlib.import_module("pspdisasm.advanced")
+
+    assert pspdisasm.analyze_advanced is advanced_module.analyze_advanced
+    assert pspdisasm.__version__ == "0.6.0"
