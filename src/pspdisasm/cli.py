@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import re
 import sys
@@ -19,8 +20,10 @@ from .errors import (
     MatchingError,
     ParseError,
 )
+from .linker import ModuleAnalysisInput, link_modules
 from .matcher import match_project_function
-from .model import DisassemblyResult, ExecutableModel
+from .model import DisassemblyResult, ExecutableModel, ModuleLinkAnalysis
+from .nids import load_nid_databases
 from .project import generate_project
 
 
@@ -40,6 +43,26 @@ def _parser() -> argparse.ArgumentParser:
     project = sub.add_parser("project", help="Generate a Splat PSP decompilation workspace")
     project.add_argument("input", type=Path)
     project.add_argument("output", type=Path)
+    project.add_argument(
+        "--nid-db",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
+    )
+
+    link = sub.add_parser("link", help="Resolve and link PSP imports/exports across multiple modules")
+    link.add_argument("inputs", type=Path, nargs="+", metavar="MODULE")
+    link.add_argument(
+        "--nid-db",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
+    )
+    link.add_argument("--json", metavar="PATH", help="Write module-link JSON; use '-' for stdout")
 
     decompile = sub.add_parser("decompile", help="Generate an assisted C draft for one project function using m2c")
     decompile.add_argument("project", type=Path)
@@ -116,6 +139,24 @@ def _disasm_summary(result: DisassemblyResult) -> str:
     return "\n".join(lines)
 
 
+def _link_summary(result: ModuleLinkAnalysis) -> str:
+    lines = [
+        f"Modules: {len(result.modules)}",
+        f"NID resolutions: {len(result.resolutions)}",
+        f"Cross-module links: {len(result.links)}",
+        f"Propagated symbols: {len(result.propagated_symbols)}",
+    ]
+    for link in result.links:
+        lines.append(
+            f"  {link.importing_module} -> {link.exporting_module}: "
+            f"{link.name} ({link.library}/0x{link.nid:08X})"
+        )
+    if result.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in result.warnings)
+    return "\n".join(lines)
+
+
 def _write_json(payload: dict, output: str | None) -> bool:
     if not output:
         return False
@@ -165,11 +206,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "project":
-            result = generate_project(args.input, args.output)
+            result = generate_project(args.input, args.output, nid_databases=args.nid_db)
             print(f"Project: {result.output_dir}")
             print(f"Base VRAM: 0x{result.base_vram:08X}")
             print(f"Target size: 0x{result.target_size:X}")
             print(f"Splat config: {result.config_path}")
+            return 0
+
+        if args.command == "link":
+            database = load_nid_databases(args.nid_db)
+            units: list[ModuleAnalysisInput] = []
+            for module_path in args.inputs:
+                model = analyze_file(module_path)
+                disassembly = disassemble_file(module_path)
+                units.append(ModuleAnalysisInput(model, disassembly))
+            result = link_modules(units, database)
+            if not _write_json(asdict(result), args.json):
+                print(_link_summary(result))
             return 0
 
         if args.command == "decompile":
@@ -213,11 +266,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout=args.timeout,
             )
             project_dir = result.project_dir
+
             def display(path: Path) -> Path:
                 try:
                     return path.relative_to(project_dir)
                 except ValueError:
                     return path
+
             print(f"Function: {result.function_name} @ 0x{result.function_address:08X}")
             print(f"Similarity: {result.similarity_percent:.2f}%")
             print(f"Score: {result.raw_score} / {result.max_score}")
@@ -239,6 +294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
     except (
         OSError,
+        ValueError,
         ParseError,
         EngineUnavailableError,
         DisassemblyError,
