@@ -139,4 +139,4 @@ def test_package_exports_phase6b_api_and_version() -> None:
 
     assert pspdisasm.load_nid_databases is load_nid_databases
     assert pspdisasm.link_modules is link_modules
-    assert pspdisasm.__version__ == "0.7.0"
+    assert pspdisasm.__version__ == "0.8.0"
