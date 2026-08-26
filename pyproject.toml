@@ -14,6 +14,7 @@ dependencies = ["PyYAML>=6.0,<7"]
 
 [project.optional-dependencies]
 analysis = ["spimdisasm>=1.42.4,<2"]
+disc = ["pycdlib>=1.14,<2", "lz4>=4.3,<5"]
 
 [project.scripts]
 pspdisasm = "pspdisasm.cli:main"
