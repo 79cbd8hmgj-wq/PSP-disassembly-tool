@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pspdisasm.model import ElfHeader, ElfImage, ProgramHeader, Relocation
 from pspdisasm.prxreloc2 import decode_prxreloc2
 
@@ -54,19 +56,15 @@ def test_relocation_keeps_legacy_constructor_and_adds_optional_prxreloc2_provena
 
 
 def test_decode_prxreloc2_minimal_r_mips_32_stream():
-    # rel segment index 2 => seg_bits=1.  The flag table indexes 1=state, 2=reloc;
-    # the type table indexes 1=compact type 2 (R_MIPS_32).
     stream = bytes.fromhex(
-        "00 00 02 01"  # header: flag_bits=2, type_bits=1
-        "03 00 01"     # flag table: size=3, state=0, relocation=1
-        "02 02"        # type table: size=2, compact R_MIPS_32 at index 1
-        "01 00"        # state: source segment 0, base offset 0
-        "4E 00"        # reloc: target segment 1, type index 1, +4 byte delta
+        "00 00 02 01"
+        "03 00 01"
+        "02 02"
+        "01 00"
+        "4E 00"
     )
     data, elf = _reloc2_elf(stream)
-
     relocations = decode_prxreloc2(data, elf, 2)
-
     assert len(relocations) == 1
     reloc = relocations[0]
     assert reloc.section == "PT_PRXRELOC2[2]"
@@ -82,62 +80,64 @@ def test_decode_prxreloc2_minimal_r_mips_32_stream():
 
 
 def test_decode_prxreloc2_extended_positive_delta():
-    stream = bytes.fromhex(
-        "00 00 02 01"
-        "03 00 03"     # relocation flag 0x03 => extended signed delta
-        "02 02"
-        "01 00"        # base = 0
-        "0E 00 04 00"  # high delta = 0, low u16 = 4
-    )
+    stream = bytes.fromhex("00 00 02 01" "03 00 03" "02 02" "01 00" "0E 00 04 00")
     data, elf = _reloc2_elf(stream)
-
     relocations = decode_prxreloc2(data, elf, 2)
-
     assert [reloc.offset for reloc in relocations] == [4]
     assert relocations[0].encoding_flags == 0x03
 
 
 def test_decode_prxreloc2_extended_negative_delta():
-    stream = bytes.fromhex(
-        "00 00 02 01"
-        "03 00 03"
-        "02 02"
-        "41 00"        # compact state command: base = 8
-        "FE FF FC FF"  # signed high half -1 + low half 0xFFFC => delta -4
-    )
+    stream = bytes.fromhex("00 00 02 01" "03 00 03" "02 02" "41 00" "FE FF FC FF")
     data, elf = _reloc2_elf(stream)
-
     relocations = decode_prxreloc2(data, elf, 2)
-
     assert [reloc.offset for reloc in relocations] == [4]
 
 
 def test_decode_prxreloc2_absolute_state_base():
     stream = bytes.fromhex(
-        "00 00 02 01"
-        "03 04 01"     # state flag 0x04 => absolute u32 base; reloc flag 0x01
-        "02 02"
-        "01 00 08 00 00 00"  # source segment 0, absolute base 8
-        "4E 00"              # target segment 1, R_MIPS_32, compact +4 delta
+        "00 00 02 01" "03 04 01" "02 02" "01 00 08 00 00 00" "4E 00"
     )
     data, elf = _reloc2_elf(stream)
-
     relocations = decode_prxreloc2(data, elf, 2)
-
     assert [reloc.offset for reloc in relocations] == [12]
 
 
 def test_decode_prxreloc2_absolute_relocation_offset():
     stream = bytes.fromhex(
-        "00 00 02 01"
-        "03 00 05"     # relocation flag 0x05 => absolute u32 source offset
-        "02 02"
-        "01 00"        # source segment 0, compact base 0
-        "0E 00 0C 00 00 00"  # target segment 1, R_MIPS_32, absolute offset 12
+        "00 00 02 01" "03 00 05" "02 02" "01 00" "0E 00 0C 00 00 00"
     )
+    data, elf = _reloc2_elf(stream)
+    relocations = decode_prxreloc2(data, elf, 2)
+    assert [reloc.offset for reloc in relocations] == [12]
+    assert relocations[0].encoding_flags == 0x05
+
+
+@pytest.mark.parametrize(
+    ("compact_type", "normalized_type", "type_name"),
+    [
+        (0, 0, "R_MIPS_NONE"),
+        (1, 1, "R_MIPS_16"),
+        (2, 2, "R_MIPS_32"),
+        (3, 4, "R_MIPS_26"),
+        (4, 5, "R_MIPS_HI16"),
+        (5, 6, "R_MIPS_LO16"),
+        (6, 14, "R_MIPS_X_J26"),
+        (7, 15, "R_MIPS_X_JAL26"),
+    ],
+)
+def test_decode_prxreloc2_maps_supported_compact_types(
+    compact_type: int,
+    normalized_type: int,
+    type_name: str,
+):
+    stream = bytes.fromhex("00 00 02 01" "03 00 01") + bytes(
+        [2, compact_type]
+    ) + bytes.fromhex("01 00 4E 00")
     data, elf = _reloc2_elf(stream)
 
     relocations = decode_prxreloc2(data, elf, 2)
 
-    assert [reloc.offset for reloc in relocations] == [12]
-    assert relocations[0].encoding_flags == 0x05
+    assert len(relocations) == 1
+    assert relocations[0].type == normalized_type
+    assert relocations[0].type_name == type_name
