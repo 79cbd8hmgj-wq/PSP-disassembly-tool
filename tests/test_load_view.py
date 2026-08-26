@@ -103,5 +103,6 @@ def test_relocated_load_view_rebases_addresses_and_applies_type_a_without_mutati
     assert view.elf.program_headers[0].vaddr == 0x08804000
     assert view.elf.sections[0].addr == 0x08804000
     assert view.elf.header.entry == 0x08804000
-    assert view.model.load_address == 0x08804000
-    assert view.model.relocation_delta == 0x08804000
+    assert view.model.elf_header is not None
+    assert view.model.elf_header.entry == 0x08804000
+    assert view.model.sections[0].addr == 0x08804000
