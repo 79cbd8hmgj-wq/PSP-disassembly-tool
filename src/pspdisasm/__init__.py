@@ -4,6 +4,7 @@ from .advanced import analyze_advanced
 from .analyzer import analyze_bytes, analyze_file
 from .asset_discovery import analyze_assets
 from .data_typing import analyze_data_types
+from .disc import scan_game_disc
 from .disassembler import disassemble_bytes, disassemble_file
 from .decompiler import decompile_project_function
 from .linker import ModuleAnalysisInput, link_modules
@@ -28,4 +29,5 @@ __all__ = [
     "link_modules",
     "load_nid_databases",
     "match_project_function",
+    "scan_game_disc",
 ]
