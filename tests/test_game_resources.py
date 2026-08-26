@@ -278,3 +278,27 @@ def test_analyze_game_resources_rejects_unsafe_container_entry_path(tmp_path):
             records,
             container_parsers=[parser],
         )
+
+
+def test_analyze_game_resources_limits_total_extracted_container_bytes(tmp_path):
+    output = tmp_path / "project"
+    payload = b"PACK" + b"abcdefgh"
+    records = [_resource(output, "PSP_GAME/USRDIR/DATA.DAT", payload)]
+    parser = _SyntheticContainerParser(
+        [
+            ContainerEntry(path="first.bin", offset=4, size=8),
+            ContainerEntry(path="duplicate.bin", offset=4, size=8),
+        ]
+    )
+
+    analysis = analyze_game_resources(
+        "game.iso",
+        output,
+        records,
+        container_parsers=[parser],
+    )
+
+    assert len(analysis.container_entries) == 1
+    assert analysis.container_entries[0].inner_path == "first.bin"
+    assert any("extraction budget" in warning.lower() for warning in analysis.resources[0].warnings)
+    assert not (output / "resources/containers/PSP_GAME/USRDIR/DATA.DAT/duplicate.bin").exists()
