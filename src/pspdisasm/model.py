@@ -26,6 +26,7 @@ class PspContainerHeader:
     compressed_size: int = 0
     subtype: int = 0
 
+
 @dataclass(slots=True)
 class ElfHeader:
     file_type: int
@@ -93,6 +94,7 @@ class ElfImage:
                 return section.offset + (address - section.addr)
         return None
 
+
 @dataclass(slots=True)
 class ModuleInfo:
     attributes: int
@@ -158,6 +160,7 @@ class PrxAnalysis:
     exports: list[LibraryExport] = field(default_factory=list)
     relocations: list[Relocation] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
 
 @dataclass(slots=True)
 class ExecutableModel:
@@ -227,6 +230,40 @@ class StringRecord:
     value: str
     section: str
     referenced_by: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class JumpTableRecord:
+    address: int
+    source_function: str
+    source_address: int
+    targets: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class CallGraphEdge:
+    source_function: str
+    target_function: str
+    source_address: int
+    target_address: int
+    kind: str
+
+
+@dataclass(slots=True)
+class FunctionConfidence:
+    name: str
+    address: int
+    score: float
+    evidence: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AdvancedAnalysisResult:
+    source_name: str
+    call_edges: list[CallGraphEdge] = field(default_factory=list)
+    function_confidence: list[FunctionConfidence] = field(default_factory=list)
+    jump_tables: list[JumpTableRecord] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
