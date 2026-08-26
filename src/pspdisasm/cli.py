@@ -21,6 +21,7 @@ from .errors import (
     MatchingError,
     ParseError,
 )
+from .game_project import generate_game_project
 from .linker import ModuleAnalysisInput, link_modules
 from .matcher import match_project_function
 from .model import DisassemblyResult, ExecutableModel, ModuleLinkAnalysis
@@ -35,6 +36,21 @@ def _parser() -> argparse.ArgumentParser:
     game = sub.add_parser("game", help="Inventory a PSP ISO/CSO and extract executable candidates")
     game.add_argument("input", type=Path)
     game.add_argument("output", type=Path)
+
+    game_project = sub.add_parser(
+        "game-project",
+        help="Analyze all usable modules in a PSP ISO/CSO and build game-wide decompilation workspaces",
+    )
+    game_project.add_argument("input", type=Path)
+    game_project.add_argument("output", type=Path)
+    game_project.add_argument(
+        "--nid-db",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
+    )
 
     analyze = sub.add_parser("analyze", help="Analyze PSP ELF/PRX/~PSP metadata")
     analyze.add_argument("input", type=Path)
@@ -208,6 +224,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Manifest: {args.output / 'metadata' / 'disc.json'}")
             for warning in manifest.warnings:
                 print(f"Warning: {warning}")
+            return 0
+
+        if args.command == "game-project":
+            result = generate_game_project(args.input, args.output, nid_databases=args.nid_db)
+            analysis = json.loads(result.analysis_path.read_text(encoding="utf-8"))
+            print(f"Game: {analysis.get('title') or '<unknown>'}")
+            if analysis.get("disc_id"):
+                print(f"Disc ID: {analysis['disc_id']}")
+            print(f"Executable candidates: {result.module_count}")
+            print(f"Analyzed modules: {result.analyzed_count}")
+            print(f"Needs decryption: {result.needs_decryption_count}")
+            print(f"Failed modules: {result.failed_count}")
+            print(f"Cross-module links: {len(analysis.get('links', {}).get('links', []))}")
+            print(f"Game analysis: {result.analysis_path}")
             return 0
 
         if args.command == "analyze":

@@ -7,6 +7,7 @@ from .data_typing import analyze_data_types
 from .disc import scan_game_disc
 from .disassembler import disassemble_bytes, disassemble_file
 from .decompiler import decompile_project_function
+from .game_project import generate_game_project
 from .linker import ModuleAnalysisInput, link_modules
 from .matcher import match_project_function
 from .nids import NidDatabase, load_nid_databases
@@ -25,6 +26,7 @@ __all__ = [
     "disassemble_bytes",
     "disassemble_file",
     "decompile_project_function",
+    "generate_game_project",
     "generate_project",
     "link_modules",
     "load_nid_databases",
