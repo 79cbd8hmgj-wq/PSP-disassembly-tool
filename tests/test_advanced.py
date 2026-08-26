@@ -10,6 +10,7 @@ from pspdisasm.model import (
     ExecutableModel,
     FunctionRecord,
     InstructionRecord,
+    JumpTableRecord,
     LibraryExport,
     NidEntry,
     ReferenceRecord,
@@ -123,3 +124,18 @@ def test_confidence_rewards_psp_export_seed_and_penalizes_invalid_code() -> None
     assert "PSP import/export seed" in confidence.evidence
     assert "invalid instruction" in confidence.evidence
     assert "unimplemented instruction" in confidence.evidence
+
+
+def test_advanced_preserves_normalized_jump_tables() -> None:
+    advanced_module = importlib.import_module("pspdisasm.advanced")
+    jump_table = JumpTableRecord(
+        address=0x08800100,
+        source_function="func_08800000",
+        source_address=0x08800018,
+        targets=[0x08800020, 0x08800040],
+    )
+    disassembly = DisassemblyResult(source_name="synthetic.elf", jump_tables=[jump_table])
+
+    result = advanced_module.analyze_advanced(_model(), disassembly)
+
+    assert result.jump_tables == [jump_table]
