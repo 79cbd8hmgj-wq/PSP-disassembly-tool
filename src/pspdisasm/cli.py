@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .analyzer import analyze_file, model_to_dict
+from .disc import scan_game_disc
 from .disassembler import disassemble_file, result_to_dict
 from .decompiler import DEFAULT_M2C_TARGET, decompile_project_function
 from .errors import (
@@ -30,6 +31,10 @@ from .project import generate_project
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pspdisasm", description="PSP executable intelligence and disassembly toolkit")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    game = sub.add_parser("game", help="Inventory a PSP ISO/CSO and extract executable candidates")
+    game.add_argument("input", type=Path)
+    game.add_argument("output", type=Path)
 
     analyze = sub.add_parser("analyze", help="Analyze PSP ELF/PRX/~PSP metadata")
     analyze.add_argument("input", type=Path)
@@ -191,6 +196,20 @@ def _write_assembly(result: DisassemblyResult, directory: Path) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "game":
+            manifest = scan_game_disc(args.input, args.output)
+            print(f"Game: {manifest.title or '<unknown>'}")
+            if manifest.disc_id:
+                print(f"Disc ID: {manifest.disc_id}")
+            print(f"Image: {manifest.image_format.upper()}")
+            print(f"Boot: {manifest.boot_path}")
+            print(f"Files: {len(manifest.files)}")
+            print(f"Executable candidates: {len(manifest.modules)}")
+            print(f"Manifest: {args.output / 'metadata' / 'disc.json'}")
+            for warning in manifest.warnings:
+                print(f"Warning: {warning}")
+            return 0
+
         if args.command == "analyze":
             model = analyze_file(args.input)
             if not _write_json(model_to_dict(model), args.json):
