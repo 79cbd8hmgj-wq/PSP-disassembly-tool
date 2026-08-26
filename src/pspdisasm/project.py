@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -11,6 +12,7 @@ import yaml
 
 from .advanced import analyze_advanced
 from .analyzer import analyze_bytes, model_to_dict
+from .asset_discovery import analyze_assets
 from .data_typing import analyze_data_types
 from .disassembler import disassemble_bytes, result_to_dict
 from .elf32 import parse_elf32
@@ -18,6 +20,7 @@ from .errors import DisassemblyError
 from .linker import ModuleAnalysisInput, link_modules
 from .model import (
     AdvancedAnalysisResult,
+    AssetDiscoveryResult,
     DataTypeRecord,
     DataTypingResult,
     DisassemblyResult,
@@ -44,9 +47,11 @@ class ProjectArtifacts:
     disassembly_json: str
     advanced_json: str
     data_typing_json: str
+    asset_discovery_json: str
     disassembly: DisassemblyResult
     advanced: AdvancedAnalysisResult
     data_typing: DataTypingResult
+    asset_discovery: AssetDiscoveryResult
     nid_analysis: ModuleLinkAnalysis | None = None
 
 
@@ -358,6 +363,7 @@ def build_project_artifacts(
         nid_analysis = link_modules([ModuleAnalysisInput(model, result)], database)
 
     data_typing = analyze_data_types(model, result, elf)
+    asset_discovery = analyze_assets(model, result, data_typing, elf)
     base_vram, target, sections = _flatten_elf(elf)
     gp = model.module_info.gp_value if model.module_info is not None else None
     splat_yaml = _render_splat_yaml(source_name, target, base_vram, sections, gp)
@@ -372,9 +378,11 @@ def build_project_artifacts(
         disassembly_json=json.dumps(result_to_dict(result), indent=2, sort_keys=True) + "\n",
         advanced_json=json.dumps(asdict(advanced), indent=2, sort_keys=True) + "\n",
         data_typing_json=json.dumps(asdict(data_typing), indent=2, sort_keys=True) + "\n",
+        asset_discovery_json=json.dumps(asdict(asset_discovery), indent=2, sort_keys=True) + "\n",
         disassembly=result,
         advanced=advanced,
         data_typing=data_typing,
+        asset_discovery=asset_discovery,
         nid_analysis=nid_analysis,
     )
 
@@ -394,6 +402,55 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _write_asset_csv(path: Path, discovery: AssetDiscoveryResult) -> None:
+    reference_counts: dict[int, int] = {}
+    for reference in discovery.references:
+        reference_counts[reference.asset_address] = reference_counts.get(reference.asset_address, 0) + 1
+
+    fields = [
+        "address",
+        "file_offset",
+        "section",
+        "format",
+        "kind",
+        "size",
+        "confidence",
+        "extractable",
+        "reference_count",
+        "suggested_extension",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for asset in sorted(discovery.assets, key=lambda item: (item.address, item.format)):
+            writer.writerow(
+                {
+                    "address": f"0x{asset.address:08X}",
+                    "file_offset": f"0x{asset.file_offset:08X}",
+                    "section": asset.section,
+                    "format": asset.format,
+                    "kind": asset.kind,
+                    "size": "" if asset.size is None else asset.size,
+                    "confidence": f"{asset.confidence:.2f}",
+                    "extractable": str(asset.extractable).lower(),
+                    "reference_count": reference_counts.get(asset.address, 0),
+                    "suggested_extension": asset.suggested_extension or "",
+                }
+            )
+
+
+def _extract_assets(output: Path, source_data: bytes, discovery: AssetDiscoveryResult) -> None:
+    for asset in sorted(discovery.assets, key=lambda item: (item.address, item.format)):
+        if not asset.extractable or asset.size is None or asset.size <= 0 or asset.file_offset < 0:
+            continue
+        end = asset.file_offset + asset.size
+        if end > len(source_data):
+            continue
+        extension = asset.suggested_extension or "bin"
+        filename = f"{asset.address:08X}_{asset.format}.{extension}"
+        (output / "assets" / filename).write_bytes(source_data[asset.file_offset:end])
+
+
 def generate_project(
     source: Path | str,
     output_dir: Path | str,
@@ -402,8 +459,9 @@ def generate_project(
 ) -> ProjectResult:
     source_path = Path(source)
     output = Path(output_dir)
+    source_data = source_path.read_bytes()
     artifacts = build_project_artifacts(
-        source_path.read_bytes(),
+        source_data,
         str(source_path),
         nid_databases=nid_databases,
     )
@@ -420,6 +478,7 @@ def generate_project(
     (output / "metadata" / "disassembly.json").write_text(artifacts.disassembly_json, encoding="utf-8")
     (output / "metadata" / "advanced.json").write_text(artifacts.advanced_json, encoding="utf-8")
     (output / "metadata" / "data_typing.json").write_text(artifacts.data_typing_json, encoding="utf-8")
+    (output / "metadata" / "asset_discovery.json").write_text(artifacts.asset_discovery_json, encoding="utf-8")
 
     normalized = result_to_dict(artifacts.disassembly)
     for key in ("functions", "symbols", "references", "strings"):
@@ -437,6 +496,12 @@ def generate_project(
         output / "metadata" / "typed_callgraph.json",
         [asdict(edge) for edge in _dedup_typed_call_edges(artifacts.advanced, artifacts.data_typing)],
     )
+
+    asset_discovery = asdict(artifacts.asset_discovery)
+    _write_json(output / "metadata" / "assets.json", asset_discovery["assets"])
+    _write_json(output / "metadata" / "asset_references.json", asset_discovery["references"])
+    _write_asset_csv(output / "reports" / "assets.csv", artifacts.asset_discovery)
+    _extract_assets(output, source_data, artifacts.asset_discovery)
 
     if artifacts.nid_analysis is not None:
         nid_analysis = asdict(artifacts.nid_analysis)
