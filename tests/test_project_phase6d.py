@@ -99,6 +99,6 @@ def test_recognized_unbounded_asset_is_not_physically_carved(tmp_path: Path):
     assert list((output / "assets").iterdir()) == []
 
 
-def test_phase6d_is_public_api_and_version_090():
+def test_phase6d_is_public_api_at_current_version():
     assert callable(pspdisasm.analyze_assets)
-    assert pspdisasm.__version__ == "0.9.0"
+    assert pspdisasm.__version__ == "0.10.0"
