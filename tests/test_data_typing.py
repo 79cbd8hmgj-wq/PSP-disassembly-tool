@@ -160,17 +160,19 @@ def test_existing_string_and_jump_table_are_seeded_at_full_confidence():
 def test_relocation_backed_function_pointer_and_data_pointer_are_accepted():
     words = {
         BASE_DATA: BASE_TEXT + 0x10,
-        BASE_DATA + 4: BASE_DATA + 0x80,
-        BASE_DATA + 8: BASE_DATA + 0x90,
+        BASE_DATA + 4: 1,
+        BASE_DATA + 8: BASE_DATA + 0x80,
+        BASE_DATA + 12: 2,
+        BASE_DATA + 16: BASE_DATA + 0x90,
     }
-    relocs = [_reloc(BASE_DATA), _reloc(BASE_DATA + 4)]
+    relocs = [_reloc(BASE_DATA), _reloc(BASE_DATA + 8)]
     model, disassembly, elf = _fixture(words, relocations=relocs)
 
     result = analyze_data_types(model, disassembly, elf)
 
     function_pointer = _type(result, BASE_DATA)
-    data_pointer = _type(result, BASE_DATA + 4)
-    arbitrary = _type(result, BASE_DATA + 8)
+    data_pointer = _type(result, BASE_DATA + 8)
+    arbitrary = _type(result, BASE_DATA + 16)
     assert function_pointer is not None and function_pointer.type_name == "function_pointer"
     assert function_pointer.target_address == BASE_TEXT + 0x10 and function_pointer.confidence == 1.0
     assert data_pointer is not None and data_pointer.type_name == "pointer"
