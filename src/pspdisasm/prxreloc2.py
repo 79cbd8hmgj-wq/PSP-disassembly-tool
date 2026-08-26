@@ -22,16 +22,8 @@ _RELOC_NAMES = {
     15: "R_MIPS_X_JAL26",
 }
 
-_COMPACT_TYPE_MAP = {
-    0: 0,
-    1: 1,
-    2: 2,
-    3: 4,
-    4: 5,
-    5: 6,
-    6: 14,
-    7: 15,
-}
+# Expand this mapping only after each compact operation has a behavioral test.
+_COMPACT_TYPE_MAP = {2: 2}
 
 
 @dataclass(slots=True)
