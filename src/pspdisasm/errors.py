@@ -16,3 +16,11 @@ class DecompilerUnavailableError(RuntimeError):
 
 class DecompilationError(RuntimeError):
     """Raised when assisted C decompilation cannot be completed safely."""
+
+
+class MatcherUnavailableError(RuntimeError):
+    """Raised when an external matching backend or objdump cannot be located."""
+
+
+class MatchingError(RuntimeError):
+    """Raised when original-vs-recompiled matching cannot be completed safely."""

@@ -15,8 +15,11 @@ from .errors import (
     DecompilerUnavailableError,
     DisassemblyError,
     EngineUnavailableError,
+    MatcherUnavailableError,
+    MatchingError,
     ParseError,
 )
+from .matcher import match_project_function
 from .model import DisassemblyResult, ExecutableModel
 from .project import generate_project
 
@@ -45,6 +48,18 @@ def _parser() -> argparse.ArgumentParser:
     decompile.add_argument("--context", type=Path, action="append", default=[], metavar="FILE", help="Preprocessed C context file; may be repeated")
     decompile.add_argument("--output", type=Path, metavar="PATH", help="Override generated C output path")
     decompile.add_argument("--target", default=DEFAULT_M2C_TARGET, metavar="TARGET", help=f"m2c target triple (default: {DEFAULT_M2C_TARGET})")
+
+    match = sub.add_parser("match", help="Compare one recompiled function against original PSP instructions with asm-differ")
+    match.add_argument("project", type=Path)
+    match.add_argument("function", help="Function name, decimal address, or 0x hexadecimal address")
+    match.add_argument("--object", dest="candidate_object", type=Path, required=True, metavar="PATH", help="Recompiled object containing the selected function")
+    match.add_argument("--asm-differ", type=Path, metavar="PATH", help="Path to asm-differ executable or diff.py")
+    match.add_argument("--objdump", type=Path, metavar="PATH", help="Path to a MIPS-capable objdump, preferably psp-objdump")
+    match.add_argument("--reference-object", type=Path, metavar="PATH", help="Use an explicit original/reference object instead of synthesizing one")
+    match.add_argument("--build-command", metavar="COMMAND", help="Command to run from the project directory before matching; parsed without a shell")
+    match.add_argument("--section", default=".text", metavar="SECTION", help="Object section to compare (default: .text)")
+    match.add_argument("--ignore-large-imms", action="store_true", help="Pass asm-differ's large-immediate normalization flag")
+    match.add_argument("--timeout", type=float, default=120.0, metavar="SECONDS", help="Timeout for build and asm-differ commands (default: 120)")
     return parser
 
 
@@ -183,6 +198,45 @@ def main(argv: Sequence[str] | None = None) -> int:
             for warning in result.warnings:
                 print(f"Warning: {warning}")
             return 0
+
+        if args.command == "match":
+            result = match_project_function(
+                args.project,
+                args.function,
+                candidate_object=args.candidate_object,
+                asm_differ_path=args.asm_differ,
+                objdump_path=args.objdump,
+                reference_object=args.reference_object,
+                build_command=args.build_command,
+                section=args.section,
+                ignore_large_imms=args.ignore_large_imms,
+                timeout=args.timeout,
+            )
+            project_dir = result.project_dir
+            def display(path: Path) -> Path:
+                try:
+                    return path.relative_to(project_dir)
+                except ValueError:
+                    return path
+            print(f"Function: {result.function_name} @ 0x{result.function_address:08X}")
+            print(f"Similarity: {result.similarity_percent:.2f}%")
+            print(f"Score: {result.raw_score} / {result.max_score}")
+            print(
+                "Rows: "
+                f"{result.matching_rows} matching, {result.changed_rows} changed, "
+                f"{result.added_rows} added, {result.removed_rows} removed"
+            )
+            print(f"Candidate object: {display(result.candidate_object)}")
+            print(f"Reference object: {display(result.reference_object)}")
+            print(f"Metadata: {display(result.metadata_path)}")
+            print(f"Raw report: {display(result.raw_report_path)}")
+            if result.backend_version:
+                print(f"Backend: {result.backend_name} {result.backend_version}")
+            else:
+                print(f"Backend: {result.backend_name}")
+            for warning in result.warnings:
+                print(f"Warning: {warning}")
+            return 0
     except (
         OSError,
         ParseError,
@@ -190,6 +244,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         DisassemblyError,
         DecompilerUnavailableError,
         DecompilationError,
+        MatcherUnavailableError,
+        MatchingError,
     ) as exc:
         print(f"pspdisasm: {exc}", file=sys.stderr)
         return 2
