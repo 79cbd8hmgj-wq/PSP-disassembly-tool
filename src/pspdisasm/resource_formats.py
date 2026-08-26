@@ -100,7 +100,6 @@ def _detect_jpeg(data: bytes, start: int) -> ResourceFormatMatch | None:
     if start + 2 > len(data) or data[start : start + 2] != b"\xff\xd8":
         return None
     cursor = start + 2
-    in_scan = False
     while cursor < len(data):
         marker_info = _jpeg_next_marker(data, cursor)
         if marker_info is None:
@@ -131,7 +130,6 @@ def _detect_jpeg(data: bytes, start: int) -> ResourceFormatMatch | None:
         if segment_end > len(data):
             return None
         cursor = segment_end
-        in_scan = marker == 0xDA
     return None
 
 
