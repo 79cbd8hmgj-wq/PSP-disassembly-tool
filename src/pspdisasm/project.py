@@ -14,10 +14,12 @@ from .advanced import analyze_advanced
 from .analyzer import analyze_bytes, model_to_dict
 from .asset_discovery import analyze_assets
 from .data_typing import analyze_data_types
-from .disassembler import disassemble_bytes, result_to_dict
+from .disassembler import result_to_dict
 from .elf32 import parse_elf32
+from .engines.spim import SpimdisasmAdapter
 from .errors import DisassemblyError
 from .linker import ModuleAnalysisInput, link_modules
+from .load_view import build_relocated_load_view
 from .model import (
     AdvancedAnalysisResult,
     AssetDiscoveryResult,
@@ -348,12 +350,22 @@ def build_project_artifacts(
     source_name: str = "<memory>",
     *,
     nid_databases: Iterable[Path | str] = (),
+    load_address: int | None = None,
 ) -> ProjectArtifacts:
     model = analyze_bytes(data, source_name)
     if model.needs_decryption:
         raise DisassemblyError("Splat project generation requires a decrypted PSP ELF/PRX input.")
     elf = parse_elf32(data)
-    result = disassemble_bytes(data, source_name)
+    if load_address is not None:
+        view = build_relocated_load_view(
+            data,
+            elf,
+            model,
+            load_address=load_address,
+        )
+        elf = view.elf
+        model = view.model
+    result = SpimdisasmAdapter().analyze(elf, model)
     advanced = analyze_advanced(model, result)
 
     database_paths = tuple(nid_databases)
@@ -456,6 +468,7 @@ def generate_project(
     output_dir: Path | str,
     *,
     nid_databases: Iterable[Path | str] = (),
+    load_address: int | None = None,
 ) -> ProjectResult:
     source_path = Path(source)
     output = Path(output_dir)
@@ -464,6 +477,7 @@ def generate_project(
         source_data,
         str(source_path),
         nid_databases=nid_databases,
+        load_address=load_address,
     )
 
     for directory in ("config", "metadata", "asm", "asm/nonmatchings", "src", "build", "reports", "assets"):
