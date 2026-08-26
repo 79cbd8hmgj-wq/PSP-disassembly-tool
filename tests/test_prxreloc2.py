@@ -125,3 +125,19 @@ def test_decode_prxreloc2_absolute_state_base():
     relocations = decode_prxreloc2(data, elf, 2)
 
     assert [reloc.offset for reloc in relocations] == [12]
+
+
+def test_decode_prxreloc2_absolute_relocation_offset():
+    stream = bytes.fromhex(
+        "00 00 02 01"
+        "03 00 05"     # relocation flag 0x05 => absolute u32 source offset
+        "02 02"
+        "01 00"        # source segment 0, compact base 0
+        "0E 00 0C 00 00 00"  # target segment 1, R_MIPS_32, absolute offset 12
+    )
+    data, elf = _reloc2_elf(stream)
+
+    relocations = decode_prxreloc2(data, elf, 2)
+
+    assert [reloc.offset for reloc in relocations] == [12]
+    assert relocations[0].encoding_flags == 0x05
