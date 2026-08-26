@@ -13,10 +13,33 @@ from pspdisasm.model import (
 )
 
 
-def _single_segment_fixture() -> tuple[bytes, ElfImage, ExecutableModel]:
-    data = bytearray(0x120)
-    struct.pack_into("<I", data, 0x100, 0x10)
+def _type_a(offset: int, relocation_type: int) -> Relocation:
+    names = {
+        2: "R_MIPS_32",
+        5: "R_MIPS_HI16",
+        6: "R_MIPS_LO16",
+    }
+    return Relocation(
+        section=".rel.text",
+        offset=offset,
+        info=relocation_type,
+        type=relocation_type,
+        type_name=names[relocation_type],
+        symbol_index=0,
+        target_section_index=None,
+        source="section",
+    )
 
+
+def _single_segment_fixture(
+    words: tuple[int, ...] = (0x10,),
+    relocations: list[Relocation] | None = None,
+) -> tuple[bytes, ElfImage, ExecutableModel]:
+    data = bytearray(0x140)
+    for index, word in enumerate(words):
+        struct.pack_into("<I", data, 0x100 + index * 4, word)
+
+    size = len(words) * 4
     header = ElfHeader(
         file_type=0xFFA0,
         machine=8,
@@ -38,8 +61,8 @@ def _single_segment_fixture() -> tuple[bytes, ElfImage, ExecutableModel]:
         offset=0x100,
         vaddr=0,
         paddr=0,
-        filesz=4,
-        memsz=8,
+        filesz=size,
+        memsz=size + 4,
         flags=7,
         align=0x10,
     )
@@ -50,7 +73,7 @@ def _single_segment_fixture() -> tuple[bytes, ElfImage, ExecutableModel]:
         flags=0x6,
         addr=0,
         offset=0x100,
-        size=4,
+        size=size,
         link=0,
         info=0,
         addralign=4,
@@ -64,16 +87,6 @@ def _single_segment_fixture() -> tuple[bytes, ElfImage, ExecutableModel]:
         sections=[section],
         raw_data=bytes(data),
     )
-    relocation = Relocation(
-        section=".rel.text",
-        offset=0,
-        info=2,
-        type=2,
-        type_name="R_MIPS_32",
-        symbol_index=0,
-        target_section_index=None,
-        source="section",
-    )
     model = ExecutableModel(
         source_name="fixture.prx",
         input_kind="elf",
@@ -83,7 +96,7 @@ def _single_segment_fixture() -> tuple[bytes, ElfImage, ExecutableModel]:
         elf_header=header,
         program_headers=[program_header],
         sections=[section],
-        relocations=[relocation],
+        relocations=relocations or [_type_a(0, 2)],
     )
     return bytes(data), elf, model
 
@@ -106,3 +119,16 @@ def test_relocated_load_view_rebases_addresses_and_applies_type_a_without_mutati
     assert view.model.elf_header is not None
     assert view.model.elf_header.entry == 0x08804000
     assert view.model.sections[0].addr == 0x08804000
+
+
+def test_type_a_hi16_uses_following_lo16_word_before_relocation():
+    data, elf, model = _single_segment_fixture(
+        words=(0x3C080000, 0x25080020),
+        relocations=[_type_a(0, 5), _type_a(4, 6)],
+    )
+
+    view = build_relocated_load_view(data, elf, model, load_address=0x08804000)
+
+    assert struct.unpack_from("<I", view.elf.raw_data, 0x100)[0] == 0x3C080880
+    assert struct.unpack_from("<I", view.elf.raw_data, 0x104)[0] == 0x25084020
+    assert view.applied_relocations == 2
