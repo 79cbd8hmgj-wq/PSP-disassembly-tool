@@ -342,6 +342,15 @@ def _read_directory(reader: _ImageReader, record: _IsoDirectoryRecord) -> bytes:
     return data
 
 
+def _read_record(reader: _ImageReader, record: _IsoDirectoryRecord) -> bytes:
+    if record.is_directory:
+        raise ParseError("Cannot read an ISO9660 directory as a file")
+    data = reader.read(record.extent * ISO_SECTOR_SIZE, record.size)
+    if len(data) != record.size:
+        raise ParseError("ISO9660 file extends beyond the image")
+    return data
+
+
 def _walk_iso(
     reader: _ImageReader,
     directory: _IsoDirectoryRecord,
@@ -430,6 +439,13 @@ def analyze_game_image(path: Path | str) -> GameImageAnalysis:
         _walk_iso(reader, root, "", entries, records, set())
         executables, boot_path = _discover_executables(reader, entries, records)
         warnings: list[str] = []
+        param_sfo: dict[str, object] = {}
+        sfo_record = records.get("/PSP_GAME/PARAM.SFO")
+        if sfo_record is not None and not sfo_record.is_directory:
+            try:
+                param_sfo = parse_param_sfo(_read_record(reader, sfo_record))
+            except ParseError as exc:
+                warnings.append(f"PARAM.SFO could not be decoded: {exc}")
         if boot_path is None:
             warnings.append("No PSP boot executable was discovered under /PSP_GAME/SYSDIR")
         return GameImageAnalysis(
@@ -440,6 +456,7 @@ def analyze_game_image(path: Path | str) -> GameImageAnalysis:
             files=entries,
             executables=executables,
             boot_path=boot_path,
+            param_sfo=param_sfo,
             warnings=warnings,
         )
     finally:
