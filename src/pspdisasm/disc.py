@@ -38,6 +38,13 @@ class GameModuleRecord:
 
 
 @dataclass(slots=True)
+class DiscResourceRecord:
+    path: str
+    size: int
+    output_path: str
+
+
+@dataclass(slots=True)
 class GameDiscManifest:
     source_name: str
     image_format: str
@@ -152,10 +159,11 @@ def _json_safe_sfo(values: dict[str, object]) -> dict[str, object]:
 
 
 def _safe_target(root: Path, logical_path: str) -> Path:
-    if PurePosixPath(logical_path).is_absolute() or ".." in PurePosixPath(logical_path).parts:
+    pure = PurePosixPath(logical_path)
+    if pure.is_absolute() or ".." in pure.parts:
         raise ParseError(f"Unsafe disc extraction path: {logical_path}")
     root = root.resolve()
-    target = (root / Path(*PurePosixPath(logical_path).parts)).resolve()
+    target = (root / Path(*pure.parts)).resolve()
     if target != root and root not in target.parents:
         raise ParseError(f"Unsafe disc extraction path: {logical_path}")
     return target
@@ -232,7 +240,7 @@ def scan_game_disc(path: Path | str, output_dir: Path | str | None = None) -> Ga
                     if modules_root is not None:
                         target = _safe_target(modules_root, item.logical_path)
                         _copy_iso_file(iso, item.physical_path, target)
-                        output_path = str(target.relative_to(output_root))
+                        output_path = str(target.relative_to(output_root.resolve()))
                     module_records.append(
                         GameModuleRecord(
                             path=item.logical_path,
@@ -264,6 +272,66 @@ def scan_game_disc(path: Path | str, output_dir: Path | str | None = None) -> Ga
                 raise
             except Exception as exc:
                 raise ParseError(f"Unable to read PSP ISO9660 filesystem: {exc}") from exc
+            finally:
+                try:
+                    iso.close()
+                except Exception:
+                    pass
+    except (ParseError, EngineUnavailableError):
+        raise
+
+
+def extract_disc_resources(
+    path: Path | str,
+    output_dir: Path | str,
+    *,
+    manifest: GameDiscManifest | None = None,
+) -> list[DiscResourceRecord]:
+    source = Path(path)
+    output_root = Path(output_dir)
+    selected_manifest = manifest if manifest is not None else scan_game_disc(source)
+    resource_files = sorted(
+        [record for record in selected_manifest.files if record.classification == "resource"],
+        key=lambda item: item.path.casefold(),
+    )
+    resources_root = output_root / "resources" / "files"
+
+    targets: dict[str, Path] = {}
+    for record in resource_files:
+        targets[record.path] = _safe_target(resources_root, record.path)
+
+    if not resource_files:
+        return []
+
+    pycdlib = _load_pycdlib()
+    iso = pycdlib.PyCdlib()
+    try:
+        with open_disc_stream(source) as (_image_format, stream):
+            try:
+                iso.open_fp(stream)
+                physical_by_logical = {
+                    item.logical_path: item.physical_path
+                    for item in _walk_files(iso)
+                }
+                results: list[DiscResourceRecord] = []
+                for record in resource_files:
+                    physical_path = physical_by_logical.get(record.path)
+                    if physical_path is None:
+                        raise ParseError(f"Disc resource is missing from image: {record.path}")
+                    target = targets[record.path]
+                    _copy_iso_file(iso, physical_path, target)
+                    results.append(
+                        DiscResourceRecord(
+                            path=record.path,
+                            size=record.size,
+                            output_path=str(target.relative_to(output_root.resolve())),
+                        )
+                    )
+                return results
+            except (ParseError, EngineUnavailableError):
+                raise
+            except Exception as exc:
+                raise ParseError(f"Unable to extract PSP disc resources: {exc}") from exc
             finally:
                 try:
                     iso.close()

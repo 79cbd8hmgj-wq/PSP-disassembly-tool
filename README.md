@@ -1,10 +1,22 @@
 # pspdisasm
 
-`pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, and matching toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of merging the upstream projects into one fork.
+`pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, matching, and whole-game resource-analysis toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of combining upstream projects into one fork.
 
-## Current status: Phase 7B
+## Current status: Phase 7C
 
-The toolkit covers the original five executable workflow layers, four advanced-analysis layers, whole-disc intake, and automatic game-wide module orchestration.
+The implemented pipeline now covers:
+
+1. PSP ELF/PRX/container analysis.
+2. Allegrex/VFPU disassembly.
+3. Splat project generation.
+4. Optional m2c-assisted C drafts.
+5. asm-differ matching support.
+6. Advanced call-graph, NID, data-typing, and embedded-asset analysis.
+7. ISO/CSO whole-disc intake.
+8. Automatic game-wide module analysis/linking.
+9. Whole-disc resource extraction, classification, and conservative embedded-resource discovery.
+
+## Implemented phases
 
 ### Phase 1 — PSP executable intelligence
 
@@ -23,134 +35,123 @@ The toolkit covers the original five executable workflow layers, four advanced-a
 ### Phase 3 — Splat workspace generation
 
 - Flatten allocated ELF sections into a VRAM-linear `target.bin`.
-- Generate PSP/GCC/little-endian `splat.yaml` configuration.
+- Generate PSP/GCC/little-endian Splat configuration.
 - Seed discovered functions, data, entrypoint, and string symbols.
 - Create reusable `metadata/`, `asm/`, `src/`, `build/`, `assets/`, and `reports/` directories.
 
 ### Phase 4 — m2c-assisted C drafts
 
-- Select a function by name or address from a Phase 3 project.
+- Select a function by name or address from a generated project.
 - Run m2c strictly out-of-process.
 - Preserve the assembly submitted to m2c and write C drafts under `src/nonmatching/`.
-- Record unsupported Allegrex/VFPU instructions instead of inventing semantics.
+- Record unsupported Allegrex/VFPU instructions rather than inventing semantics.
 
-### Phase 5 — asm-differ matching workflow
+### Phase 5 — asm-differ matching
 
-- Select a Phase 3/4 function by name or address.
-- Synthesize a minimal little-endian MIPS ELF reference object directly from the original Phase 2 instruction words.
-- Optionally run an explicit build command to create the current candidate object.
+- Select a function by name or address.
+- Synthesize a minimal little-endian MIPS ELF reference object from original instruction words.
+- Optionally run an explicit build command for the candidate object.
 - Run asm-differ strictly out-of-process in object/JSON mode.
-- Normalize raw asm-differ score data into a 0–100 similarity percentage plus matching/changed/added/removed row counts.
-- Persist the synthesized reference object, normalized matching metadata, and the complete raw asm-differ JSON report.
-- Preserve previous successful reports when a build or backend invocation fails.
+- Normalize matching data into a 0–100 similarity score plus matching/changed/added/removed row counts.
+- Persist normalized metadata and the raw asm-differ report.
 
 ### Phase 6A — advanced program analysis
 
-- Normalize direct calls and spimdisasm-resolved indirect `jalr` calls into a function-to-function call graph.
-- Expose accepted spimdisasm jump-table discoveries without inventing tables from arbitrary pointer-looking data.
-- Decode consecutive little-endian jump-table entries only while they resolve to executable mapped sections.
-- Assign deterministic `0.00`–`1.00` function-boundary confidence scores with human-readable evidence.
-- Reward ELF-entry, PSP import/export seeds, incoming calls, and valid/implemented instruction bodies while penalizing invalid or unimplemented instructions.
-- Emit standalone call-graph, jump-table, confidence, and combined advanced-analysis JSON reports during project generation.
+- Function-to-function call graph from direct calls and accepted resolved indirect `jalr` calls.
+- Conservative jump-table discovery.
+- Deterministic function-boundary confidence scoring with evidence.
+- Standalone call-graph, jump-table, confidence, and combined advanced-analysis JSON.
 
 ### Phase 6B — NID intelligence and cross-module linking
 
-- Load external NID databases without vendoring one database into the core package.
-- Accept normalized JSON records and PSPLibDoc-style CSV rows containing library, function/variable kind, NID, name, and source/provenance.
+- Load external normalized JSON or PSPLibDoc-style CSV NID databases.
 - Resolve imports/exports by exact `(library, kind, NID)` identity.
-- Merge multiple databases deterministically; later files win and conflicting strong names produce warnings.
-- Treat `<library>_<NID>` placeholder names as traceable but low-confidence rather than authoritative.
-- Link imports to exports only when exactly one supplied module exports the same library/kind/NID identity.
-- Reject ambiguous multi-provider relationships instead of guessing.
-- Propagate trusted database names at confidence `1.0` and meaningful names learned through unique module links at confidence `0.95`.
-- Keep autogenerated names such as `func_XXXXXXXX` from becoming false high-confidence propagated names.
-- Feed strong resolved names into generated `config/symbols.txt` without overwriting entrypoint or string symbols.
+- Deterministic database conflict handling.
+- Unique cross-module import-to-export linking.
+- Trusted symbol propagation without promoting autogenerated names.
+- Optional NID-derived symbol seeding during project generation.
 
-### Phase 6C — conservative data typing and reference intelligence
+### Phase 6C — conservative data typing
 
-- Preserve already accepted strings and jump tables as confidence-`1.0` typed objects instead of rediscovering them heuristically.
-- Infer `pointer`, `function_pointer`, `pointer_table`, and `function_pointer_table` objects only when corroborated by safe relocations, exact known identities, normalized anchors, or accepted repeated table patterns.
-- Reject arbitrary mapped-looking 32-bit integers and unaligned slots as standalone pointers.
-- Restrict byte scanning to allocated, file-backed, non-executable storage and never read `SHT_NOBITS` bytes.
-- Treat direct virtual-address relocations as evidence while skipping unmappable records with deterministic warnings; `PT_PRXRELOC2` remains intentionally undecoded.
-- Infer bounded `struct_candidate` objects from anchored data with at least two accepted typed fields.
-- Infer `array_candidate` objects only when two or more consecutive fixed-size records share the same typed-field signature.
-- Resolve overlapping hypotheses deterministically with strings/jump tables/tables taking precedence over weaker structural or leaf guesses.
-- Emit one typed-reference record for every normalized Phase 2 reference, preserving the original source/target identity and adding target type/confidence/evidence.
-- Add `typed_indirect` call edges only when an existing indirect-call reference targets a slot accepted as a function pointer to a known function.
-- Feed only confidence-`0.90` or stronger pointer/table object names into generated symbols, while preserving entrypoint, string, curated, function, and stronger NID names.
+- Preserve accepted strings/jump tables as typed objects.
+- Infer pointers, function pointers, pointer tables, and function-pointer tables only with corroborating evidence.
+- Infer bounded struct/array candidates conservatively.
+- Emit typed references and additive typed-indirect call edges.
+- Never classify arbitrary mapped-looking integers as pointers solely because they resemble addresses.
 
-### Phase 6D — conservative asset and resource discovery
+### Phase 6D — embedded asset/resource discovery inside executables
 
-- Scan only allocated, file-backed, non-executable ELF storage; executable sections and `SHT_NOBITS` are never treated as asset byte streams.
-- Detect embedded PNG and JPEG images with validated bounded endings.
-- Detect bounded RIFF/WAVE audio and specialize validated ATRAC-family RIFF containers as AT3 resources.
-- Detect VAG audio using internally plausible big-endian header fields and bounded payload sizes.
-- Recognize PSP GIM and PSMF/PMF resources conservatively even when a trustworthy full extent cannot yet be derived.
-- Scan at byte granularity so resources need not be word aligned.
-- Suppress overlapping weaker candidates when a validated extractable asset owns the byte range.
-- Link discovered asset starts back to existing normalized direct references, Phase 6C typed references, and typed data targets by exact address only.
-- Cap link confidence by the evidence that already exists instead of adding new pointer heuristics.
-- Extract bytes only when the detector has a known positive size and a fully validated source-file extent.
-- Emit deterministic JSON metadata plus an analyst-friendly CSV inventory.
+- Scan allocated, file-backed, non-executable ELF storage.
+- Detect PNG, JPEG, RIFF/WAVE, ATRAC-family AT3, VAG, GIM, and PSMF/PMF resources.
+- Link exact resource starts back to existing code/data references.
+- Physically carve only resources with proven complete bounds.
+- Emit deterministic JSON and CSV inventories.
 
-### Phase 7A — whole-disc ISO/CSO intake
+### Phase 7A — ISO/CSO whole-disc intake
 
-- Accept raw ISO9660 PSP images and CISO/CSO version 0, 1, and 2 images.
-- Read CSO blocks on demand through a seekable clean-room reader instead of expanding an entire compressed image first.
-- Support raw-DEFLATE CSO blocks and optional LZ4 blocks used by CSO v2.
-- Traverse the PSP ISO9660 filesystem through optional `pycdlib` without copying its LGPL source into this MIT repository.
-- Parse `PSP_GAME/PARAM.SFO` string/integer metadata and preserve unsupported value formats without guessing.
-- Prefer a valid executable `PSP_GAME/SYSDIR/EBOOT.BIN`, with a valid `BOOT.BIN` fallback.
-- Inventory the full filesystem while distinguishing boot executable, module candidates, metadata, and resources.
-- Extract only executable candidates, with containment checks preventing disc paths from escaping the output `modules/` root.
-- Emit deterministic `metadata/disc.json` and `metadata/param_sfo.json` for later analysis.
+- Accept ISO9660 and CISO/CSO v0/v1/v2 images.
+- Read CSO blocks on demand rather than expanding the entire image.
+- Support raw-DEFLATE and optional CSO v2 LZ4 blocks.
+- Traverse ISO9660 through optional pycdlib.
+- Parse `PSP_GAME/PARAM.SFO` metadata.
+- Prefer usable `EBOOT.BIN`, with `BOOT.BIN` fallback.
+- Inventory the complete filesystem and safely extract executable candidates.
+- Emit `metadata/disc.json` and `metadata/param_sfo.json`.
 
-Phase 7A remains the lightweight scan/extraction layer. Use it when you want a disc inventory without automatically creating per-module decompilation workspaces.
+### Phase 7B — game-wide module analysis
 
-### Phase 7B — game-wide module analysis and orchestration
+- Analyze all extracted executable candidates in deterministic disc-path order.
+- Record encrypted `~PSP` modules as `needs_decryption`.
+- Generate one normal Splat project per usable decrypted module under `projects/<logical-disc-path>/`.
+- Isolate ordinary secondary-module parse/disassembly/project failures.
+- Run one game-wide Phase 6B linker pass across all successfully analyzed modules.
+- Emit `game_analysis.json`, `module_links.json`, and `propagated_symbols.json`.
+- Keep traversal/symlink containment failures fatal.
 
-- Feed every Phase 7A executable candidate through the existing PSP analyzer in deterministic disc-path order.
-- Record encrypted `~PSP` candidates as `needs_decryption` without pretending their encrypted bodies can be analyzed.
-- Disassemble every usable decrypted ELF/PRX candidate with the existing Allegrex/VFPU pipeline.
-- Generate a normal Splat decompilation workspace for each analyzed module beneath a mirrored `projects/<logical-disc-path>/` hierarchy.
-- Isolate module-local parsing, disassembly, and project-generation failures so one bad secondary module does not abort analysis of the rest of the game.
-- Run one game-wide Phase 6B import/export linker pass across all successfully analyzed decrypted modules.
-- Apply optional repeatable NID databases consistently to per-module projects and the game-wide linker.
-- Emit deterministic `metadata/game_analysis.json`, `metadata/module_links.json`, and `metadata/propagated_symbols.json` reports.
-- Preserve containment checks for both extracted modules and mirrored project paths.
+### Phase 7C — game-wide resource orchestration
 
-Phase 7B completes automatic executable/module orchestration for a PSP game image. Recursive proprietary resource/archive analysis and game-wide asset conversion remain later phases.
+- Extract every Phase 7A file classified as a resource beneath `resources/files/<logical-disc-path>`.
+- Classify supported loose resources from file content rather than filename extensions.
+- Reuse one neutral detector layer across Phase 6D and Phase 7C.
+- Detect PNG, JPEG, RIFF/WAVE, AT3, VAG, GIM, and PSMF/PMF resources.
+- Preserve unsupported or proprietary files explicitly as `unknown` instead of guessing.
+- Scan files up to 64 MiB for supported embedded resources.
+- Physically extract only bounded embedded resources whose complete byte extent is proven.
+- Keep larger files inventoried while skipping their full embedded scan with a warning.
+- Emit deterministic game-resource JSON and CSV reports.
+- Provide a `ResourceContainerParser` extension boundary for future title-specific archive parsers without shipping speculative universal `.BIN/.DAT/.ARC/.PAC/.PAK/.PKG` decoders.
+
+See [`docs/phase7c-game-resources.md`](docs/phase7c-game-resources.md) for the detailed Phase 7C behavior and safety boundaries.
 
 ## Installation
 
-Basic PSP executable parsing requires only the core package dependencies:
+Core parsing:
 
 ```bash
 python -m pip install -e .
 ```
 
-Install Phase 2 analysis engines with:
+Allegrex analysis engines:
 
 ```bash
 python -m pip install -e '.[analysis]'
 ```
 
-Install ISO/CSO disc support with:
+ISO/CSO support:
 
 ```bash
 python -m pip install -e '.[disc]'
 ```
 
-For the complete implemented workflow:
+Complete implemented workflow:
 
 ```bash
 python -m pip install -e '.[analysis,disc]'
 ```
 
-The `disc` extra contains `pycdlib` for ISO9660 traversal and `lz4` for CSO v2 LZ4 blocks. Raw ISO and CSO v0/v1 DEFLATE handling do not import these packages during executable-only commands.
+The `disc` extra contains pycdlib for ISO9660 traversal and lz4 for CSO v2 LZ4 blocks.
 
-Phase 4 and Phase 5 intentionally keep their external tools out of the package dependency graph:
+Phase 4 and Phase 5 keep their external tools outside the package dependency graph:
 
 - m2c must be supplied separately for `decompile`.
 - asm-differ must be supplied separately for `match`.
@@ -159,38 +160,25 @@ Phase 4 and Phase 5 intentionally keep their external tools out of the package d
 
 ## Commands
 
-### Scan a PSP game image
+### Lightweight disc inventory
 
 ```bash
 pspdisasm game game.iso game_intake
 pspdisasm game game.cso game_intake
 ```
 
-Phase 7A creates a filesystem/module inventory and safely extracts executable candidates:
+`game` remains the Phase 7A scan-only boundary. It inventories the PSP filesystem and extracts executable candidates, but does not recursively create module projects or copy/analyze every resource.
 
-```text
-game_intake/
-├── metadata/
-│   ├── disc.json
-│   └── param_sfo.json
-└── modules/
-    └── PSP_GAME/
-        ├── SYSDIR/
-        │   └── EBOOT.BIN
-        └── USRDIR/
-            └── ... executable PRX candidates ...
-```
-
-Encrypted `~PSP` files are still extracted and identified as PSP containers, but their encrypted bodies are not decrypted by Phase 7A.
-
-### Analyze an entire PSP game image
+### Whole-game project
 
 ```bash
 pspdisasm game-project game.iso game_decomp
 pspdisasm game-project game.cso game_decomp --nid-db psp_nids.csv
 ```
 
-Phase 7B performs Phase 7A intake first, then analyzes every usable decrypted executable candidate, creates per-module projects, and runs a single game-wide linker pass:
+`game-project` automatically runs Phase 7A, Phase 7B, and Phase 7C.
+
+Typical output:
 
 ```text
 game_decomp/
@@ -199,24 +187,30 @@ game_decomp/
 │   ├── param_sfo.json
 │   ├── game_analysis.json
 │   ├── module_links.json
-│   └── propagated_symbols.json
+│   ├── propagated_symbols.json
+│   ├── game_resources.json
+│   └── embedded_resources.json
+├── reports/
+│   └── game_resources.csv
 ├── modules/
-│   └── PSP_GAME/
-│       ├── SYSDIR/EBOOT.BIN
-│       └── USRDIR/... extracted PRX candidates ...
-└── projects/
-    └── PSP_GAME/
-        ├── SYSDIR/
-        │   └── EBOOT.BIN/
-        │       └── ... normal Splat workspace ...
-        └── USRDIR/
-            └── MODULE.PRX/
-                └── ... normal Splat workspace ...
+│   └── PSP_GAME/... executable candidates ...
+├── projects/
+│   └── PSP_GAME/... per-module Splat workspaces ...
+└── resources/
+    ├── files/
+    │   └── PSP_GAME/... loose disc resources ...
+    └── embedded/
+        └── PSP_GAME/.../<OFFSET>_<format>.<ext>
 ```
 
-Each candidate is reported as `analyzed`, `needs_decryption`, or `failed`. Encrypted modules and isolated module-local failures remain explicit in `game_analysis.json` without preventing valid decrypted modules from completing.
+The CLI summary reports executable/module counts plus:
 
-### Analyze
+- total resource files;
+- known-format resource files;
+- unknown resource files;
+- embedded resources discovered.
+
+### Analyze one executable
 
 ```bash
 pspdisasm analyze decrypted_EBOOT.BIN
@@ -230,13 +224,13 @@ pspdisasm disasm decrypted_EBOOT.BIN
 pspdisasm disasm decrypted_EBOOT.BIN --asm-dir asm --json disassembly.json
 ```
 
-### Generate a decompilation project
+### Generate one decompilation project
 
 ```bash
 pspdisasm project decrypted_EBOOT.BIN game_decomp
 ```
 
-Apply one or more NID databases while generating the project:
+With optional NID databases:
 
 ```bash
 pspdisasm project module.prx game_decomp \
@@ -244,50 +238,9 @@ pspdisasm project module.prx game_decomp \
   --nid-db game_specific_nids.json
 ```
 
-Later `--nid-db` files take precedence when the same exact library/kind/NID identity appears more than once.
-
-Typical generated structure:
-
-```text
-game_decomp/
-├── splat.yaml
-├── target.bin
-├── config/
-│   └── symbols.txt
-├── metadata/
-│   ├── executable.json
-│   ├── disassembly.json
-│   ├── functions.json
-│   ├── symbols.json
-│   ├── references.json
-│   ├── strings.json
-│   ├── advanced.json
-│   ├── callgraph.json
-│   ├── jump_tables.json
-│   ├── function_confidence.json
-│   ├── data_typing.json
-│   ├── data_types.json
-│   ├── typed_references.json
-│   ├── typed_callgraph.json
-│   ├── asset_discovery.json
-│   ├── assets.json
-│   ├── asset_references.json
-│   ├── nids.json                  # when --nid-db is supplied
-│   └── propagated_symbols.json    # when --nid-db is supplied
-├── asm/
-│   └── nonmatchings/
-├── src/
-├── build/
-├── assets/                        # only safely bounded resources are carved
-└── reports/
-    └── assets.csv
-```
-
-Phase 6A, Phase 6C, and Phase 6D run automatically during project generation. Phase 6B NID resolution runs when at least one `--nid-db` is supplied.
+Later NID databases take precedence for an identical library/kind/NID identity.
 
 ### Link PSP modules
-
-Analyze import/export relationships across two or more decrypted ELF/PRX inputs:
 
 ```bash
 pspdisasm link game.prx service.prx utility.prx \
@@ -295,15 +248,7 @@ pspdisasm link game.prx service.prx utility.prx \
   --json module_links.json
 ```
 
-Use `--json -` for stdout. NID databases are optional for `link`: exact cross-module relationships can still be discovered without them, using known local names when trustworthy and deterministic `<library>_<NID>` fallbacks otherwise.
-
-The normalized link report contains:
-
-- analyzed module names;
-- import/export NID resolutions and provenance;
-- unique cross-module import-to-export links;
-- propagated symbol suggestions with confidence scores;
-- ambiguity/database conflict warnings.
+NID databases are optional for `link`; exact cross-module relationships can still be discovered without them.
 
 ### Generate an assisted C draft
 
@@ -311,7 +256,7 @@ The normalized link report contains:
 pspdisasm decompile game_decomp func_08812340 --m2c /path/to/m2c.py
 ```
 
-or by address:
+or:
 
 ```bash
 pspdisasm decompile game_decomp 0x08812340 --m2c /path/to/m2c.py
@@ -321,8 +266,6 @@ m2c can also be resolved from `PSPDISASM_M2C` or an `m2c` executable on `PATH`.
 
 ### Match a recompiled function
 
-Compile the edited C with the intended PSP compiler/toolchain, then point `pspdisasm` at the resulting object:
-
 ```bash
 pspdisasm match game_decomp func_08812340 \
   --object build/src/nonmatching/func_08812340.o \
@@ -330,7 +273,7 @@ pspdisasm match game_decomp func_08812340 \
   --objdump /path/to/psp-objdump
 ```
 
-Run a build command immediately before matching:
+Optional build command:
 
 ```bash
 pspdisasm match game_decomp func_08812340 \
@@ -342,29 +285,17 @@ pspdisasm match game_decomp func_08812340 \
 
 The build command is parsed into argv and executed without `shell=True`.
 
-Backend paths can also be configured through:
+Environment fallbacks:
 
 ```text
+PSPDISASM_M2C=/path/to/m2c.py
 PSPDISASM_ASM_DIFFER=/path/to/diff.py
 PSPDISASM_OBJDUMP=/path/to/psp-objdump
-```
-
-If no explicit objdump is supplied, `pspdisasm` searches for `psp-objdump`, then `mipsel-linux-gnu-objdump`, then `objdump`.
-
-Additional matching options:
-
-```text
---reference-object PATH   use a known original object instead of synthesizing one
---section SECTION         compare a section other than .text
---ignore-large-imms       pass asm-differ's large-immediate normalization option
---timeout SECONDS         build/backend timeout; default 120
 ```
 
 ## NID database formats
 
 ### JSON
-
-A JSON database is a list of records:
 
 ```json
 [
@@ -378,155 +309,56 @@ A JSON database is a list of records:
 ]
 ```
 
-`kind` accepts `fun`, `func`, `function`, `var`, or `variable`. NIDs can be integers, `0x` hexadecimal strings, or bare eight-digit hexadecimal strings.
+`kind` accepts `fun`, `func`, `function`, `var`, or `variable`. NIDs may be integers, `0x` hexadecimal strings, or bare eight-digit hexadecimal strings.
 
 ### PSPLibDoc-style CSV
-
-The CSV compatibility boundary uses the five-column layout:
 
 ```text
 library,fun/var,NID,name,source
 sceDisplay,fun,289D82FE,sceDisplaySetFrameBuf,matching
 ```
 
-A header is optional. Empty rows and `#` comment rows are ignored. Direct PSPLibDoc XML and PPSSPP source parsing are not yet implemented; export those sources into normalized CSV/JSON before loading them.
+A header is optional. Empty rows and `#` comment rows are ignored.
 
-## Phase 5 artifacts
+## Python API
 
-For an automatically synthesized reference object:
-
-```text
-game_decomp/
-├── build/matching/reference/func_08812340.o
-├── metadata/matching/func_08812340.json
-└── reports/matching/func_08812340.asm-differ.json
-```
-
-The normalized metadata records:
-
-- function name/address/size/section;
-- candidate and reference object paths;
-- asm-differ version when detectable;
-- objdump path;
-- build command when used;
-- raw score and asm-differ maximum score;
-- normalized similarity percentage;
-- matching, changed, added, and removed row counts;
-- matching settings and warnings.
-
-An asm-differ raw score of zero maps to `100.00%` similarity. Because asm-differ penalties can exceed its deletion-based `max_score`, normalized similarity is clamped to the 0–100 range while the original raw values remain preserved.
-
-## Phase 6A artifacts
-
-Project generation emits:
-
-- `metadata/advanced.json` — complete normalized advanced-analysis result;
-- `metadata/callgraph.json` — direct and resolved-indirect function edges;
-- `metadata/jump_tables.json` — accepted table address, source jump site, owning function, and executable targets;
-- `metadata/function_confidence.json` — score and evidence for each discovered function boundary.
-
-The advanced layer consumes only normalized PSP executable/disassembly models. It does not import spimdisasm or Rabbitizer directly, keeping upstream-engine access isolated inside the Phase 2 adapter.
-
-## Phase 6B Python API
-
-The public package exposes:
+Representative public entry points:
 
 ```python
-from pspdisasm import ModuleAnalysisInput, NidDatabase, link_modules, load_nid_databases
+from pspdisasm import (
+    ModuleAnalysisInput,
+    NidDatabase,
+    analyze_advanced,
+    analyze_assets,
+    analyze_bytes,
+    analyze_data_types,
+    analyze_file,
+    analyze_game_resources,
+    decompile_project_function,
+    disassemble_bytes,
+    disassemble_file,
+    generate_game_project,
+    generate_project,
+    link_modules,
+    load_nid_databases,
+    match_project_function,
+    scan_game_disc,
+)
 ```
 
-`link_modules` operates on normalized `ExecutableModel`/`DisassemblyResult` inputs and does not mutate either model. This makes its cross-module analysis usable by CLI workflows, project generators, and whole-game orchestrators.
+`generate_game_project()` is the high-level whole-game API. `analyze_game_resources()` is the Phase 7C API for already-extracted `DiscResourceRecord` values.
 
-## Phase 6C Python API and artifacts
+## Resource-analysis safety model
 
-The public package also exposes:
+A signature alone does not authorize arbitrary carving.
 
-```python
-from pspdisasm import analyze_data_types
-```
-
-`analyze_data_types(model, disassembly, elf)` returns a `DataTypingResult` without mutating the executable or disassembly models. The analysis layer is intentionally pure with respect to Rabbitizer and spimdisasm: it consumes only their already-normalized outputs plus the parsed ELF image.
-
-Project generation emits:
-
-- `metadata/data_typing.json` — complete Phase 6C result including warnings;
-- `metadata/data_types.json` — accepted typed objects and candidates;
-- `metadata/typed_references.json` — original reference identity plus target typing/confidence/evidence;
-- `metadata/typed_callgraph.json` — additive typed-indirect call edges not already represented by an identical Phase 6A indirect edge.
-
-Phase 6C is deliberately conservative. A value being aligned and inside a mapped section is not enough to call it a pointer, exact C struct recovery is not claimed, scalar-only arrays are not inferred, and compressed `PT_PRXRELOC2` streams are not decoded or applied.
-
-## Phase 6D Python API and artifacts
-
-The package exposes:
-
-```python
-from pspdisasm import analyze_assets
-```
-
-`analyze_assets(model, disassembly, data_typing, elf)` returns an `AssetDiscoveryResult` without mutating any lower-level model. It consumes Phase 2 references and Phase 6C typed relationships only as existing evidence.
-
-Project generation emits:
-
-- `metadata/asset_discovery.json` — complete Phase 6D result including warnings;
-- `metadata/assets.json` — normalized discovered asset records;
-- `metadata/asset_references.json` — exact-start code/data references to accepted assets;
-- `reports/assets.csv` — deterministic inventory with address, file offset, section, format, kind, size, confidence, extraction state, and reference count;
-- `assets/<ADDRESS>_<format>.<ext>` — only for validated assets whose complete source-file extent is known.
-
-A signature alone never authorizes arbitrary carving. GIM/PMF candidates with recognized but currently unbounded extents remain metadata-only records, and malformed candidates do not abort project analysis.
-
-## Phase 7A Python API and artifacts
-
-The package exposes:
-
-```python
-from pspdisasm import scan_game_disc
-```
-
-`scan_game_disc(path, output_dir=None)` returns a deterministic `GameDiscManifest`. When an output directory is supplied it also writes the disc/SFO metadata and extracts only executable candidates beneath `modules/`.
-
-The manifest records:
-
-- source image and detected `iso`/`cso` format;
-- title, disc ID/version, and required PSP system version when available;
-- selected boot path;
-- every ISO9660 file with normalized logical path, size, classification, and executable kind;
-- extracted executable candidates and their output paths;
-- non-fatal metadata warnings.
-
-Use Phase 7A directly when only scan/extraction is needed; Phase 7B composes this manifest into the full module-analysis workflow.
-
-## Phase 7B Python API and artifacts
-
-The package exposes:
-
-```python
-from pspdisasm import generate_game_project
-```
-
-`generate_game_project(source, output_dir, nid_databases=())` performs Phase 7A intake, analyzes every usable decrypted executable candidate, generates mirrored per-module projects, and links the successfully analyzed module set.
-
-It writes:
-
-- `metadata/game_analysis.json` — authoritative whole-game module status, counts, warnings, and normalized linker result;
-- `metadata/module_links.json` — the standalone game-wide `ModuleLinkAnalysis`;
-- `metadata/propagated_symbols.json` — game-wide propagated symbol suggestions;
-- `projects/<logical-disc-path>/` — one normal Splat workspace for each module with status `analyzed`.
-
-Module statuses are explicit: `analyzed`, `needs_decryption`, or `failed`. Module-local parse/disassembly/project failures are isolated, while missing global analysis engines remain fatal.
-
-See `docs/phase7b-game-analysis.md` for the full orchestration boundary and output layout.
-
-## Reference-object design and limitation
-
-Phase 5 builds the reference `.o` directly from the exact instruction words already stored in `metadata/functions.json`. The generated object is ELF32 little-endian `ET_REL`/`EM_MIPS` and contains `.text`, `.symtab`, `.strtab`, and `.shstrtab` with a global function symbol.
-
-The synthesized object does **not yet synthesize MIPS relocation records**. A function containing calls or global/data references may therefore receive a pessimistic score when the newly compiled object contains symbolic relocations. If the Phase 2 reference metadata shows external references, `pspdisasm` records this limitation as a warning. A real original/reference object can be supplied with `--reference-object` when one exists.
-
-## Correct compiler requirement
-
-A matching score is meaningful only when the candidate is compiled with the appropriate PSP compiler version, ABI, optimization settings, and project flags. `pspdisasm` deliberately does not choose or emulate that compiler. Phase 5 owns orchestration and reporting; compiler identification/reproduction is a separate project concern.
+- Known loose files require an accepted content match at offset zero.
+- Phase 6D/7C format detection uses confidence thresholds and structural validation.
+- Bounded extraction requires a complete in-range extent.
+- Unknown proprietary containers remain unknown.
+- Full embedded scanning is capped at 64 MiB per loose resource file.
+- Traversal and symlink escapes from output roots are fatal.
+- Ordinary malformed/unsupported resources are isolated and recorded rather than aborting the complete game run.
 
 ## Upstream tool roles
 
@@ -534,36 +366,35 @@ A matching score is meaningful only when the candidate is compiled with the appr
 - **spimdisasm** — MIPS/Allegrex function, symbol, and reference analysis.
 - **Splat** — PSP-aware decompilation project conventions and splitting workflow.
 - **m2c** — optional assembly-to-C assistance, kept out-of-process because of GPLv3.
-- **asm-differ** — original-vs-recompiled function diff/scoring backend, kept out-of-process.
-- **pycdlib** — optional ISO9660 traversal dependency for Phase 7A; its LGPL source is not copied into the MIT core.
-- **maxcso** — CSO/CISO format/reference behavior used to validate the clean-room seekable reader design.
-- **PPSSPP** — PSP disc layout/loader behavioral reference only; GPL code is not copied into the core.
-- **PSPLibDoc-compatible data** — optional external NID naming input; no database is bundled into the package.
+- **asm-differ** — original-vs-recompiled matching backend, kept out-of-process.
+- **pycdlib** — optional ISO9660 traversal dependency; LGPL source is not copied into the MIT core.
+- **maxcso** — CISO/CSO behavior/reference source for the clean-room reader.
+- **PPSSPP** — PSP disc/media/container behavioral reference; GPL code is not copied into the core.
+- **PSPLibDoc-compatible data** — optional external NID naming input; no NID database is bundled.
 
 ## Current limitations
 
 - No PSP cryptographic decryption.
 - No GZIP/KL4E/2RLZ decompression of encrypted `~PSP` bodies.
 - No `PT_PRXRELOC2` decompression/application yet.
-- No bundled PSP NID database; Phase 6B consumes external JSON/CSV data.
-- No direct PSPLibDoc XML or PPSSPP source parser yet.
-- Phase 7B orchestrates executable modules across ISO/CSO images but does not recursively analyze arbitrary proprietary resource archives or containers.
-- Phase 7B does not yet reinject game-wide propagated names into every already-generated per-module `config/symbols.txt`.
-- Phase 6D does not transcode textures/models/audio, guess proprietary archives, or carve resources whose full extent cannot be validated.
+- No bundled PSP NID database.
+- No direct PSPLibDoc XML or PPSSPP source parser.
+- No universal parser for proprietary game archives/containers.
+- Phase 7C does not transcode textures, models, audio, or video.
+- Phase 6D/7C conservatively recognize GIM/PMF candidates but only extract when a complete extent is proven.
+- No game-wide asset-to-code relationship is claimed without direct evidence.
 - m2c does not understand every PSP Allegrex/VFPU instruction.
 - Synthesized Phase 5 reference objects do not yet reproduce original relocation tables.
 - No automatic PSP compiler/version identification yet.
-- Phase 6C infers conservative structural candidates; it does not claim exact C struct/header or scalar-array recovery.
-- No ZSO/DAX disc input yet.
-- No parallel module-analysis scheduler yet.
+- Phase 6C infers conservative structural candidates; it does not claim exact C struct/header recovery.
 
 ## Development
 
-Run the test suite with the implemented analysis and disc dependencies available:
+Install test dependencies and run the complete synthetic suite:
 
 ```bash
 python -m pip install -e '.[analysis,disc]' pytest
 PYTHONPATH=src python -m pytest -q
 ```
 
-The repository test workflow installs both extras and runs the complete synthetic suite on pushes and pull requests. The tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, and CSO structures; no commercial game data is included.
+The GitHub Actions workflow runs the same implemented dependency set on pushes and pull requests. Tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, CSO, and resource structures; no commercial game data is included.

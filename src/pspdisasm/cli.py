@@ -39,7 +39,7 @@ def _parser() -> argparse.ArgumentParser:
 
     game_project = sub.add_parser(
         "game-project",
-        help="Analyze all usable modules in a PSP ISO/CSO and build game-wide decompilation workspaces",
+        help="Analyze PSP ISO/CSO modules and resources and build game-wide decompilation workspaces",
     )
     game_project.add_argument("input", type=Path)
     game_project.add_argument("output", type=Path)
@@ -237,7 +237,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Needs decryption: {result.needs_decryption_count}")
             print(f"Failed modules: {result.failed_count}")
             print(f"Cross-module links: {len(analysis.get('links', {}).get('links', []))}")
+            print(f"Resources: {result.resource_count}")
+            print(f"Known resources: {result.known_resource_count}")
+            print(f"Unknown resources: {result.unknown_resource_count}")
+            print(f"Embedded resources: {result.embedded_resource_count}")
             print(f"Game analysis: {result.analysis_path}")
+            if result.resources_path is not None:
+                print(f"Resource analysis: {result.resources_path}")
             return 0
 
         if args.command == "analyze":

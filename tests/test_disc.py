@@ -2,9 +2,11 @@ import io
 import json
 import struct
 
-from pspdisasm.disc import scan_game_disc
-
 import pycdlib
+import pytest
+
+from pspdisasm.disc import DiscFileRecord, extract_disc_resources, scan_game_disc
+from pspdisasm.errors import ParseError
 
 
 SFO_HEADER = struct.Struct("<4sIIII")
@@ -36,7 +38,13 @@ def build_sfo(values: dict[str, object]) -> bytes:
     return header + index + keys + data
 
 
-def build_psp_iso(path, *, eboot: bytes, boot: bytes | None = None) -> None:
+def build_psp_iso(
+    path,
+    *,
+    eboot: bytes,
+    boot: bytes | None = None,
+    resources: dict[str, bytes] | None = None,
+) -> None:
     iso = pycdlib.PyCdlib()
     iso.new(interchange_level=3)
     iso.add_directory(iso_path="/PSP_GAME")
@@ -62,6 +70,8 @@ def build_psp_iso(path, *, eboot: bytes, boot: bytes | None = None) -> None:
     ]
     if boot is not None:
         files.append(("/PSP_GAME/SYSDIR/BOOT.BIN;1", boot))
+    for logical_path, payload in sorted((resources or {}).items()):
+        files.append((f"/{logical_path};1", payload))
 
     for iso_path, payload in files:
         iso.add_fp(io.BytesIO(payload), len(payload), iso_path=iso_path)
@@ -116,3 +126,47 @@ def test_scan_game_disc_falls_back_to_boot_bin_when_eboot_is_not_executable(tmp_
     by_path = {record.path: record for record in manifest.files}
     assert by_path["PSP_GAME/SYSDIR/BOOT.BIN"].classification == "boot"
     assert by_path["PSP_GAME/SYSDIR/EBOOT.BIN"].classification == "resource"
+
+
+def test_extract_disc_resources_copies_only_resource_files_under_resource_root(tmp_path):
+    image = tmp_path / "resources.iso"
+    output = tmp_path / "project"
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    data = b"opaque proprietary data"
+    build_psp_iso(
+        image,
+        eboot=b"\x7fELF" + b"E" * 60,
+        resources={
+            "PSP_GAME/USRDIR/TEXTURE.PNG": png,
+            "PSP_GAME/USRDIR/DATA.BIN": data,
+        },
+    )
+    manifest = scan_game_disc(image, output)
+
+    resources = extract_disc_resources(image, output, manifest=manifest)
+
+    assert [record.path for record in resources] == sorted(
+        [record.path for record in resources], key=str.casefold
+    )
+    by_path = {record.path: record for record in resources}
+    assert by_path["PSP_GAME/USRDIR/TEXTURE.PNG"].output_path == (
+        "resources/files/PSP_GAME/USRDIR/TEXTURE.PNG"
+    )
+    assert by_path["PSP_GAME/USRDIR/DATA.BIN"].output_path == (
+        "resources/files/PSP_GAME/USRDIR/DATA.BIN"
+    )
+    assert (output / by_path["PSP_GAME/USRDIR/TEXTURE.PNG"].output_path).read_bytes() == png
+    assert (output / by_path["PSP_GAME/USRDIR/DATA.BIN"].output_path).read_bytes() == data
+    assert all(record.path != "PSP_GAME/SYSDIR/EBOOT.BIN" for record in resources)
+    assert all(record.path != "PSP_GAME/USRDIR/PLUGIN.PRX" for record in resources)
+
+
+def test_extract_disc_resources_rejects_unsafe_manifest_paths_before_copy(tmp_path):
+    image = tmp_path / "unsafe.iso"
+    output = tmp_path / "project"
+    build_psp_iso(image, eboot=b"\x7fELF" + b"E" * 60)
+    manifest = scan_game_disc(image, output)
+    manifest.files.append(DiscFileRecord("../escape", 4, "resource"))
+
+    with pytest.raises(ParseError, match="Unsafe disc extraction path"):
+        extract_disc_resources(image, output, manifest=manifest)

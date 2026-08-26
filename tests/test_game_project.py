@@ -18,6 +18,7 @@ from tests.fixtures import build_allegrex_elf32, build_psp_container_header
 
 SFO_HEADER = struct.Struct("<4sIIII")
 SFO_ENTRY = struct.Struct("<HHIII")
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x00IEND\xaeB`\x82"
 
 
 def _build_sfo(values: dict[str, object]) -> bytes:
@@ -52,7 +53,13 @@ def _build_sfo(values: dict[str, object]) -> bytes:
     return header + index + keys + data
 
 
-def _build_game_iso(path, *, eboot: bytes, modules: dict[str, bytes] | None = None) -> None:
+def _build_game_iso(
+    path,
+    *,
+    eboot: bytes,
+    modules: dict[str, bytes] | None = None,
+    resources: dict[str, bytes] | None = None,
+) -> None:
     iso = pycdlib.PyCdlib()
     iso.new(interchange_level=3)
     iso.add_directory(iso_path="/PSP_GAME")
@@ -74,6 +81,8 @@ def _build_game_iso(path, *, eboot: bytes, modules: dict[str, bytes] | None = No
         ("/PSP_GAME/SYSDIR/EBOOT.BIN;1", eboot),
     ]
     for logical_path, payload in sorted((modules or {}).items()):
+        files.append((f"/{logical_path};1", payload))
+    for logical_path, payload in sorted((resources or {}).items()):
         files.append((f"/{logical_path};1", payload))
 
     for iso_path, payload in files:
@@ -209,3 +218,30 @@ def test_generate_game_project_rejects_unsafe_mirrored_project_path(tmp_path, mo
 
     with pytest.raises(ValueError, match="Unsafe game project path"):
         generate_game_project("synthetic.iso", output)
+
+
+def test_generate_game_project_analyzes_whole_disc_resources(tmp_path):
+    image = tmp_path / "resources.iso"
+    output = tmp_path / "game_decomp"
+    _build_game_iso(
+        image,
+        eboot=build_allegrex_elf32(),
+        resources={
+            "PSP_GAME/USRDIR/TEXTURE.PNG": PNG,
+            "PSP_GAME/USRDIR/DATA.BIN": b"opaque proprietary payload",
+        },
+    )
+
+    result = generate_game_project(image, output)
+
+    assert result.analyzed_count == 1
+    assert result.resource_count == 2
+    assert result.known_resource_count == 1
+    assert result.unknown_resource_count == 1
+    assert result.embedded_resource_count == 0
+    assert result.resources_path == output / "metadata" / "game_resources.json"
+    assert (output / "metadata/game_resources.json").exists()
+    assert (output / "metadata/embedded_resources.json").exists()
+    assert (output / "reports/game_resources.csv").exists()
+    assert (output / "resources/files/PSP_GAME/USRDIR/TEXTURE.PNG").read_bytes() == PNG
+    assert (output / "resources/files/PSP_GAME/USRDIR/DATA.BIN").read_bytes() == b"opaque proprietary payload"

@@ -6,9 +6,10 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from .analyzer import analyze_file
-from .disc import scan_game_disc
+from .disc import extract_disc_resources, scan_game_disc
 from .disassembler import disassemble_file
 from .errors import DisassemblyError, EngineUnavailableError, ParseError
+from .game_resources import analyze_game_resources
 from .linker import ModuleAnalysisInput, link_modules
 from .model import ModuleLinkAnalysis
 from .nids import load_nid_databases
@@ -52,6 +53,11 @@ class GameProjectResult:
     analyzed_count: int
     needs_decryption_count: int
     failed_count: int
+    resource_count: int = 0
+    known_resource_count: int = 0
+    unknown_resource_count: int = 0
+    embedded_resource_count: int = 0
+    resources_path: Path | None = None
 
 
 def _safe_relative_target(root: Path, relative_path: str) -> Path:
@@ -92,6 +98,9 @@ def generate_game_project(
     output = Path(output_dir)
     database_paths = tuple(nid_databases)
     manifest = scan_game_disc(source_path, output)
+
+    resource_files = extract_disc_resources(source_path, output, manifest=manifest)
+    resource_analysis = analyze_game_resources(str(source_path), output, resource_files)
 
     module_records: list[GameModuleAnalysisRecord] = []
     link_units: list[ModuleAnalysisInput] = []
@@ -188,12 +197,18 @@ def generate_game_project(
     )
     analysis_path = output / "metadata" / "game_analysis.json"
     links_path = output / "metadata" / "module_links.json"
+    resources_path = output / "metadata" / "game_resources.json"
     _write_json(analysis_path, asdict(analysis))
     _write_json(links_path, asdict(links))
     _write_json(
         output / "metadata" / "propagated_symbols.json",
         [asdict(record) for record in links.propagated_symbols],
     )
+
+    known_resource_count = sum(
+        1 for record in resource_analysis.resources if record.detected_format != "unknown"
+    )
+    resource_count = len(resource_analysis.resources)
 
     return GameProjectResult(
         output_dir=output,
@@ -203,4 +218,9 @@ def generate_game_project(
         analyzed_count=analyzed_count,
         needs_decryption_count=needs_decryption_count,
         failed_count=failed_count,
+        resource_count=resource_count,
+        known_resource_count=known_resource_count,
+        unknown_resource_count=resource_count - known_resource_count,
+        embedded_resource_count=len(resource_analysis.embedded_resources),
+        resources_path=resources_path,
     )
