@@ -20,6 +20,7 @@ from .errors import (
     MatchingError,
     ParseError,
 )
+from .game_image import GameImageAnalysis, analyze_game_image, extract_game_executables
 from .linker import ModuleAnalysisInput, link_modules
 from .matcher import match_project_function
 from .model import DisassemblyResult, ExecutableModel, ModuleLinkAnalysis
@@ -50,6 +51,16 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="FILE",
         help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
+    )
+
+    game = sub.add_parser("game", help="Inspect a PSP ISO/CSO image and discover contained executables")
+    game.add_argument("input", type=Path)
+    game.add_argument("--json", metavar="PATH", help="Write normalized game-image JSON; use '-' for stdout")
+    game.add_argument(
+        "--extract",
+        type=Path,
+        metavar="DIR",
+        help="Extract discovered ELF/~PSP executables while preserving their disc paths",
     )
 
     link = sub.add_parser("link", help="Resolve and link PSP imports/exports across multiple modules")
@@ -120,6 +131,27 @@ def _summary(model: ExecutableModel) -> str:
     if model.warnings:
         lines.append("Warnings:")
         lines.extend(f"  - {warning}" for warning in model.warnings)
+    return "\n".join(lines)
+
+
+def _game_summary(result: GameImageAnalysis) -> str:
+    lines = [
+        f"Input: {result.source_name}",
+        f"Format: {result.image_format.upper()}",
+        f"Logical size: 0x{result.logical_size:X}",
+        f"Files/directories: {result.file_count}",
+        f"Executables: {len(result.executables)}",
+        f"Boot: {result.boot_path or 'not found'}",
+    ]
+    title = result.param_sfo.get("TITLE")
+    disc_id = result.param_sfo.get("DISC_ID")
+    if title:
+        lines.append(f"Title: {title}")
+    if disc_id:
+        lines.append(f"Disc ID: {disc_id}")
+    if result.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in result.warnings)
     return "\n".join(lines)
 
 
@@ -211,6 +243,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Base VRAM: 0x{result.base_vram:08X}")
             print(f"Target size: 0x{result.target_size:X}")
             print(f"Splat config: {result.config_path}")
+            return 0
+
+        if args.command == "game":
+            result = analyze_game_image(args.input)
+            payload = asdict(result)
+            payload["file_count"] = result.file_count
+            extracted: list[Path] = []
+            if args.extract is not None:
+                extracted = extract_game_executables(args.input, args.extract)
+                payload["extracted_files"] = [str(path.relative_to(args.extract)) for path in extracted]
+            else:
+                payload["extracted_files"] = []
+            if not _write_json(payload, args.json):
+                print(_game_summary(result))
+                for path in extracted:
+                    print(f"Extracted: {path}")
             return 0
 
         if args.command == "link":
