@@ -1,10 +1,10 @@
 # pspdisasm
 
-`pspdisasm` is a PSP-focused executable-analysis, disassembly, decompilation, and matching toolkit. It adds PSP-specific container/PRX intelligence around the Decompollaborate ecosystem instead of merging the upstream projects into one fork.
+`pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, and matching toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of merging the upstream projects into one fork.
 
-## Current status: Phase 6D
+## Current status: Phase 7A
 
-The toolkit currently covers the original five workflow layers plus four advanced-analysis layers.
+The toolkit covers the original five executable workflow layers, four advanced-analysis layers, and the first whole-game disc-intake layer.
 
 ### Phase 1 — PSP executable intelligence
 
@@ -94,7 +94,19 @@ The toolkit currently covers the original five workflow layers plus four advance
 - Extract bytes only when the detector has a known positive size and a fully validated source-file extent.
 - Emit deterministic JSON metadata plus an analyst-friendly CSV inventory.
 
-Phase 6D intentionally stops at executable/module-scoped resource intelligence. ISO/CSO filesystem orchestration, recursive game-wide asset discovery, format conversion, and game-specific resource-manager reconstruction belong to later phases.
+### Phase 7A — whole-disc ISO/CSO intake
+
+- Accept raw ISO9660 PSP images and CISO/CSO version 0, 1, and 2 images.
+- Read CSO blocks on demand through a seekable clean-room reader instead of expanding an entire compressed image first.
+- Support raw-DEFLATE CSO blocks and optional LZ4 blocks used by CSO v2.
+- Traverse the PSP ISO9660 filesystem through optional `pycdlib` without copying its LGPL source into this MIT repository.
+- Parse `PSP_GAME/PARAM.SFO` string/integer metadata and preserve unsupported value formats without guessing.
+- Prefer a valid executable `PSP_GAME/SYSDIR/EBOOT.BIN`, with a valid `BOOT.BIN` fallback.
+- Inventory the full filesystem while distinguishing boot executable, module candidates, metadata, and resources.
+- Extract only executable candidates, with containment checks preventing disc paths from escaping the output `modules/` root.
+- Emit deterministic `metadata/disc.json` and `metadata/param_sfo.json` for the next orchestration phase.
+
+Phase 7A intentionally stops at disc discovery and executable extraction. Phase 7B will feed those extracted modules through the existing analysis/project/linking layers and build a unified game-wide analysis workspace.
 
 ## Installation
 
@@ -110,6 +122,20 @@ Install Phase 2 analysis engines with:
 python -m pip install -e '.[analysis]'
 ```
 
+Install ISO/CSO disc support with:
+
+```bash
+python -m pip install -e '.[disc]'
+```
+
+For the complete implemented workflow:
+
+```bash
+python -m pip install -e '.[analysis,disc]'
+```
+
+The `disc` extra contains `pycdlib` for ISO9660 traversal and `lz4` for CSO v2 LZ4 blocks. Raw ISO and CSO v0/v1 DEFLATE handling do not import these packages during executable-only commands.
+
 Phase 4 and Phase 5 intentionally keep their external tools out of the package dependency graph:
 
 - m2c must be supplied separately for `decompile`.
@@ -118,6 +144,30 @@ Phase 4 and Phase 5 intentionally keep their external tools out of the package d
 - the correct PSP compiler/build toolchain remains project-specific and is not bundled.
 
 ## Commands
+
+### Scan a PSP game image
+
+```bash
+pspdisasm game game.iso game_intake
+pspdisasm game game.cso game_intake
+```
+
+Phase 7A creates a filesystem/module inventory and safely extracts executable candidates:
+
+```text
+game_intake/
+├── metadata/
+│   ├── disc.json
+│   └── param_sfo.json
+└── modules/
+    └── PSP_GAME/
+        ├── SYSDIR/
+        │   └── EBOOT.BIN
+        └── USRDIR/
+            └── ... executable PRX candidates ...
+```
+
+Encrypted `~PSP` files are still extracted and identified as PSP containers, but their encrypted bodies are not decrypted by Phase 7A.
 
 ### Analyze
 
@@ -379,6 +429,27 @@ Project generation emits:
 
 A signature alone never authorizes arbitrary carving. GIM/PMF candidates with recognized but currently unbounded extents remain metadata-only records, and malformed candidates do not abort project analysis.
 
+## Phase 7A Python API and artifacts
+
+The package exposes:
+
+```python
+from pspdisasm import scan_game_disc
+```
+
+`scan_game_disc(path, output_dir=None)` returns a deterministic `GameDiscManifest`. When an output directory is supplied it also writes the disc/SFO metadata and extracts only executable candidates beneath `modules/`.
+
+The manifest records:
+
+- source image and detected `iso`/`cso` format;
+- title, disc ID/version, and required PSP system version when available;
+- selected boot path;
+- every ISO9660 file with normalized logical path, size, classification, and executable kind;
+- extracted executable candidates and their output paths;
+- non-fatal metadata warnings.
+
+Phase 7A does not automatically disassemble every extracted module or build a unified cross-module project; that is the Phase 7B boundary.
+
 ## Reference-object design and limitation
 
 Phase 5 builds the reference `.o` directly from the exact instruction words already stored in `metadata/functions.json`. The generated object is ELF32 little-endian `ET_REL`/`EM_MIPS` and contains `.text`, `.symtab`, `.strtab`, and `.shstrtab` with a global function symbol.
@@ -396,6 +467,9 @@ A matching score is meaningful only when the candidate is compiled with the appr
 - **Splat** — PSP-aware decompilation project conventions and splitting workflow.
 - **m2c** — optional assembly-to-C assistance, kept out-of-process because of GPLv3.
 - **asm-differ** — original-vs-recompiled function diff/scoring backend, kept out-of-process.
+- **pycdlib** — optional ISO9660 traversal dependency for Phase 7A; its LGPL source is not copied into the MIT core.
+- **maxcso** — CSO/CISO format/reference behavior used to validate the clean-room seekable reader design.
+- **PPSSPP** — PSP disc layout/loader behavioral reference only; GPL code is not copied into the core.
 - **PSPLibDoc-compatible data** — optional external NID naming input; no database is bundled into the package.
 
 ## Current limitations
@@ -405,7 +479,7 @@ A matching score is meaningful only when the candidate is compiled with the appr
 - No `PT_PRXRELOC2` decompression/application yet.
 - No bundled PSP NID database; Phase 6B consumes external JSON/CSV data.
 - No direct PSPLibDoc XML or PPSSPP source parser yet.
-- No ISO/CSO filesystem extraction or game-wide orchestration yet.
+- Phase 7A inventories ISO/CSO files and extracts executable candidates but does not yet recursively run analysis/project generation across the full game; that is Phase 7B.
 - Phase 6D does not transcode textures/models/audio, guess proprietary archives, or carve resources whose full extent cannot be validated.
 - m2c does not understand every PSP Allegrex/VFPU instruction.
 - Synthesized Phase 5 reference objects do not yet reproduce original relocation tables.
@@ -414,10 +488,11 @@ A matching score is meaningful only when the candidate is compiled with the appr
 
 ## Development
 
-Run the test suite with the Phase 2 analysis dependencies available:
+Run the test suite with the implemented analysis and disc dependencies available:
 
 ```bash
+python -m pip install -e '.[analysis,disc]' pytest
 PYTHONPATH=src python -m pytest -q
 ```
 
-The repository test workflow installs the analysis extra and runs the complete synthetic suite on pushes and pull requests. The tests use synthetic PSP-like ELF/PRX structures; no commercial game data is included.
+The repository test workflow installs both extras and runs the complete synthetic suite on pushes and pull requests. The tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, and CSO structures; no commercial game data is included.
