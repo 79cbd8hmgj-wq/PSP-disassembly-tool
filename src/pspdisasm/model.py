@@ -282,6 +282,7 @@ class DisassemblyResult:
     symbols: list[SymbolRecord] = field(default_factory=list)
     references: list[ReferenceRecord] = field(default_factory=list)
     strings: list[StringRecord] = field(default_factory=list)
+    jump_tables: list[JumpTableRecord] = field(default_factory=list)
     assembly_sections: list[AssemblySection] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
