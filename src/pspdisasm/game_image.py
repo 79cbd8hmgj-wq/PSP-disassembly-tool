@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Protocol
+import struct
+import zlib
 
 from .errors import ParseError
 
 
 ISO_SECTOR_SIZE = 2048
 ISO_PRIMARY_VOLUME_DESCRIPTOR_SECTOR = 16
+CSO_HEADER_SIZE = 24
+CSO_INDEX_MASK = 0x7FFFFFFF
+CSO_INDEX_UNCOMPRESSED = 0x80000000
 
 
 @dataclass(slots=True)
@@ -43,7 +48,18 @@ class GameImageAnalysis:
         return len(self.files)
 
 
+class _ImageReader(Protocol):
+    size: int
+    image_format: str
+
+    def close(self) -> None: ...
+
+    def read(self, offset: int, size: int) -> bytes: ...
+
+
 class _RawImageReader:
+    image_format = "iso"
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self.size = path.stat().st_size
@@ -61,12 +77,139 @@ class _RawImageReader:
         return self._stream.read(min(size, self.size - offset))
 
 
+class _CsoImageReader:
+    image_format = "cso"
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._physical_size = path.stat().st_size
+        self._stream: BinaryIO = path.open("rb")
+        header = self._stream.read(CSO_HEADER_SIZE)
+        if len(header) != CSO_HEADER_SIZE:
+            self.close()
+            raise ParseError("Truncated CSO header")
+
+        magic, _declared_header_size, total_size, block_size, version, index_shift, _unused = struct.unpack(
+            "<4sIQIBB2s", header
+        )
+        if magic != b"CISO":
+            self.close()
+            raise ParseError("Invalid CSO magic")
+        if version not in (0, 1):
+            self.close()
+            raise ParseError(f"Unsupported CSO version: {version}; expected version 0 or 1")
+        if block_size < ISO_SECTOR_SIZE or block_size & (block_size - 1):
+            self.close()
+            raise ParseError("CSO block size must be a power of two and at least 2048 bytes")
+        if index_shift > 20:
+            self.close()
+            raise ParseError("CSO index shift is unreasonably large")
+        if total_size <= 0:
+            self.close()
+            raise ParseError("CSO declares an empty logical image")
+
+        self.size = total_size
+        self.block_size = block_size
+        self.index_shift = index_shift
+        self.block_count = (total_size + block_size - 1) // block_size
+        index_bytes = self._stream.read((self.block_count + 1) * 4)
+        if len(index_bytes) != (self.block_count + 1) * 4:
+            self.close()
+            raise ParseError("Truncated CSO block index")
+        self._indices = list(struct.unpack(f"<{self.block_count + 1}I", index_bytes))
+        self._validate_indices()
+        self._cached_block_number: int | None = None
+        self._cached_block = b""
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def _index_offset(self, value: int) -> int:
+        return (value & CSO_INDEX_MASK) << self.index_shift
+
+    def _validate_indices(self) -> None:
+        previous = 0
+        for index, value in enumerate(self._indices):
+            offset = self._index_offset(value)
+            if index and offset < previous:
+                self.close()
+                raise ParseError("CSO block index offsets are not monotonic")
+            if offset > self._physical_size:
+                self.close()
+                raise ParseError("CSO block index points beyond the compressed file")
+            previous = offset
+
+    def _read_block(self, block_number: int) -> bytes:
+        if block_number == self._cached_block_number:
+            return self._cached_block
+        if not 0 <= block_number < self.block_count:
+            raise ParseError("CSO block number is out of range")
+
+        current = self._indices[block_number]
+        next_value = self._indices[block_number + 1]
+        start = self._index_offset(current)
+        end = self._index_offset(next_value)
+        if end < start:
+            raise ParseError("CSO block has a negative compressed span")
+
+        remaining = self.size - block_number * self.block_size
+        expected_size = min(self.block_size, remaining)
+        self._stream.seek(start)
+        if current & CSO_INDEX_UNCOMPRESSED:
+            block = self._stream.read(expected_size)
+            if len(block) != expected_size:
+                raise ParseError("Truncated uncompressed CSO block")
+        else:
+            compressed = self._stream.read(end - start)
+            if len(compressed) != end - start:
+                raise ParseError("Truncated compressed CSO block")
+            try:
+                block = zlib.decompress(compressed, -15)
+            except zlib.error as exc:
+                raise ParseError(f"Invalid CSO deflate block {block_number}") from exc
+            if len(block) != expected_size:
+                raise ParseError(
+                    f"CSO block {block_number} decompressed to {len(block)} bytes; expected {expected_size}"
+                )
+
+        self._cached_block_number = block_number
+        self._cached_block = block
+        return block
+
+    def read(self, offset: int, size: int) -> bytes:
+        if offset < 0 or size < 0:
+            raise ParseError("Negative image read is invalid")
+        if offset >= self.size or size == 0:
+            return b""
+        end = min(offset + size, self.size)
+        output = bytearray()
+        cursor = offset
+        while cursor < end:
+            block_number = cursor // self.block_size
+            block_offset = cursor % self.block_size
+            block = self._read_block(block_number)
+            take = min(end - cursor, len(block) - block_offset)
+            if take <= 0:
+                raise ParseError("CSO block mapping made no forward progress")
+            output.extend(block[block_offset : block_offset + take])
+            cursor += take
+        return bytes(output)
+
+
 @dataclass(slots=True)
 class _IsoDirectoryRecord:
     extent: int
     size: int
     is_directory: bool
     identifier: bytes
+
+
+def _open_image_reader(path: Path) -> _ImageReader:
+    with path.open("rb") as stream:
+        magic = stream.read(4)
+    if magic == b"CISO":
+        return _CsoImageReader(path)
+    return _RawImageReader(path)
 
 
 def _read_u32_le(data: bytes, offset: int) -> int:
@@ -113,7 +256,7 @@ def _clean_identifier(identifier: bytes) -> str | None:
     return name
 
 
-def _parse_primary_volume(reader: _RawImageReader) -> _IsoDirectoryRecord:
+def _parse_primary_volume(reader: _ImageReader) -> _IsoDirectoryRecord:
     offset = ISO_PRIMARY_VOLUME_DESCRIPTOR_SECTOR * ISO_SECTOR_SIZE
     descriptor = reader.read(offset, ISO_SECTOR_SIZE)
     if len(descriptor) != ISO_SECTOR_SIZE:
@@ -129,9 +272,7 @@ def _parse_primary_volume(reader: _RawImageReader) -> _IsoDirectoryRecord:
     return root
 
 
-def _read_directory(reader: _RawImageReader, record: _IsoDirectoryRecord) -> bytes:
-    if record.size < 0:
-        raise ParseError("Negative ISO9660 directory size")
+def _read_directory(reader: _ImageReader, record: _IsoDirectoryRecord) -> bytes:
     data = reader.read(record.extent * ISO_SECTOR_SIZE, record.size)
     if len(data) != record.size:
         raise ParseError("ISO9660 directory extends beyond the image")
@@ -139,7 +280,7 @@ def _read_directory(reader: _RawImageReader, record: _IsoDirectoryRecord) -> byt
 
 
 def _walk_iso(
-    reader: _RawImageReader,
+    reader: _ImageReader,
     directory: _IsoDirectoryRecord,
     parent_path: str,
     entries: list[GameImageFile],
@@ -177,7 +318,7 @@ def _walk_iso(
             _walk_iso(reader, parsed, path, entries, records, visited)
 
 
-def _read_record_prefix(reader: _RawImageReader, record: _IsoDirectoryRecord, size: int = 4) -> bytes:
+def _read_record_prefix(reader: _ImageReader, record: _IsoDirectoryRecord, size: int = 4) -> bytes:
     return reader.read(record.extent * ISO_SECTOR_SIZE, min(size, record.size))
 
 
@@ -190,7 +331,7 @@ def _executable_kind(prefix: bytes) -> str | None:
 
 
 def _discover_executables(
-    reader: _RawImageReader, entries: list[GameImageFile], records: dict[str, _IsoDirectoryRecord]
+    reader: _ImageReader, entries: list[GameImageFile], records: dict[str, _IsoDirectoryRecord]
 ) -> tuple[list[GameExecutable], str | None]:
     executables: list[GameExecutable] = []
     by_path = {entry.path.upper(): entry for entry in entries if not entry.is_directory}
@@ -218,7 +359,7 @@ def _discover_executables(
 
 def analyze_game_image(path: Path | str) -> GameImageAnalysis:
     source = Path(path)
-    reader = _RawImageReader(source)
+    reader = _open_image_reader(source)
     try:
         root = _parse_primary_volume(reader)
         entries: list[GameImageFile] = []
@@ -230,7 +371,7 @@ def analyze_game_image(path: Path | str) -> GameImageAnalysis:
             warnings.append("No PSP boot executable was discovered under /PSP_GAME/SYSDIR")
         return GameImageAnalysis(
             source_name=str(source),
-            image_format="iso",
+            image_format=reader.image_format,
             logical_size=reader.size,
             sector_size=ISO_SECTOR_SIZE,
             files=entries,
