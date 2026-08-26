@@ -300,6 +300,9 @@ def extract_disc_resources(
     for record in resource_files:
         targets[record.path] = _safe_target(resources_root, record.path)
 
+    if not resource_files:
+        return []
+
     pycdlib = _load_pycdlib()
     iso = pycdlib.PyCdlib()
     try:
