@@ -8,7 +8,10 @@ from typing import Iterable
 from .analyzer import analyze_file
 from .disc import scan_game_disc
 from .disassembler import disassemble_file
+from .errors import DisassemblyError, EngineUnavailableError, ParseError
+from .linker import ModuleAnalysisInput, link_modules
 from .model import ModuleLinkAnalysis
+from .nids import load_nid_databases
 from .project import generate_project
 
 
@@ -75,6 +78,10 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _relative_display(path: Path, output: Path) -> str:
+    return str(path.relative_to(output.resolve()))
+
+
 def generate_game_project(
     source: Path | str,
     output_dir: Path | str,
@@ -87,6 +94,7 @@ def generate_game_project(
     manifest = scan_game_disc(source_path, output)
 
     module_records: list[GameModuleAnalysisRecord] = []
+    link_units: list[ModuleAnalysisInput] = []
     analyzed_count = 0
     needs_decryption_count = 0
     failed_count = 0
@@ -106,46 +114,68 @@ def generate_game_project(
             failed_count += 1
             continue
 
-        extracted = _safe_relative_target(output, candidate.output_path)
-        model = analyze_file(extracted)
-        name = _module_name(model)
-        if model.needs_decryption:
+        extracted: Path | None = None
+        model = None
+        try:
+            extracted = _safe_relative_target(output, candidate.output_path)
+            model = analyze_file(extracted)
+            name = _module_name(model)
+            if model.needs_decryption:
+                module_records.append(
+                    GameModuleAnalysisRecord(
+                        path=candidate.path,
+                        extracted_path=_relative_display(extracted, output),
+                        executable_kind=candidate.executable_kind,
+                        is_boot=candidate.is_boot,
+                        status="needs_decryption",
+                        module_name=name,
+                        warnings=list(model.warnings),
+                    )
+                )
+                needs_decryption_count += 1
+                continue
+
+            disassembly = disassemble_file(extracted)
+            project_root = _safe_relative_target(output / "projects", candidate.path)
+            generate_project(extracted, project_root, nid_databases=database_paths)
             module_records.append(
                 GameModuleAnalysisRecord(
                     path=candidate.path,
-                    extracted_path=str(extracted.relative_to(output.resolve())),
+                    extracted_path=_relative_display(extracted, output),
                     executable_kind=candidate.executable_kind,
                     is_boot=candidate.is_boot,
-                    status="needs_decryption",
+                    status="analyzed",
                     module_name=name,
-                    warnings=list(model.warnings),
+                    project_path=_relative_display(project_root, output),
+                    function_count=len(disassembly.functions),
+                    symbol_count=len(disassembly.symbols),
+                    reference_count=len(disassembly.references),
+                    string_count=len(disassembly.strings),
+                    warnings=[*model.warnings, *disassembly.warnings],
                 )
             )
-            needs_decryption_count += 1
-            continue
-
-        disassembly = disassemble_file(extracted)
-        project_root = _safe_relative_target(output / "projects", candidate.path)
-        generate_project(extracted, project_root, nid_databases=database_paths)
-        module_records.append(
-            GameModuleAnalysisRecord(
-                path=candidate.path,
-                extracted_path=str(extracted.relative_to(output.resolve())),
-                executable_kind=candidate.executable_kind,
-                is_boot=candidate.is_boot,
-                status="analyzed",
-                module_name=name,
-                project_path=str(project_root.relative_to(output.resolve())),
-                function_count=len(disassembly.functions),
-                symbol_count=len(disassembly.symbols),
-                reference_count=len(disassembly.references),
-                string_count=len(disassembly.strings),
-                warnings=[*model.warnings, *disassembly.warnings],
+            link_units.append(ModuleAnalysisInput(model, disassembly))
+            analyzed_count += 1
+        except EngineUnavailableError:
+            raise
+        except (ParseError, DisassemblyError, OSError, ValueError) as exc:
+            module_records.append(
+                GameModuleAnalysisRecord(
+                    path=candidate.path,
+                    extracted_path=(
+                        _relative_display(extracted, output) if extracted is not None else candidate.output_path
+                    ),
+                    executable_kind=candidate.executable_kind,
+                    is_boot=candidate.is_boot,
+                    status="failed",
+                    module_name=_module_name(model) if model is not None else None,
+                    warnings=[str(exc)],
+                )
             )
-        )
-        analyzed_count += 1
+            failed_count += 1
 
-    links = ModuleLinkAnalysis()
+    database = load_nid_databases(database_paths)
+    links = link_modules(link_units, database)
     analysis = GameProjectAnalysis(
         source_name=str(source_path),
         title=manifest.title,
@@ -160,7 +190,10 @@ def generate_game_project(
     links_path = output / "metadata" / "module_links.json"
     _write_json(analysis_path, asdict(analysis))
     _write_json(links_path, asdict(links))
-    _write_json(output / "metadata" / "propagated_symbols.json", [])
+    _write_json(
+        output / "metadata" / "propagated_symbols.json",
+        [asdict(record) for record in links.propagated_symbols],
+    )
 
     return GameProjectResult(
         output_dir=output,
