@@ -12,6 +12,7 @@ from ..model import (
     ExecutableModel,
     FunctionRecord,
     InstructionRecord,
+    JumpTableRecord,
     ReferenceRecord,
     SymbolRecord,
     StringRecord,
@@ -69,6 +70,7 @@ class SpimdisasmAdapter:
 
         functions: list[FunctionRecord] = []
         references: list[ReferenceRecord] = []
+        jump_tables: list[JumpTableRecord] = []
         assembly_sections: list[AssemblySection] = []
         warnings: list[str] = []
         try:
@@ -113,12 +115,15 @@ class SpimdisasmAdapter:
                 )
                 functions.extend(self._normalize_functions(text, section))
                 references.extend(self._normalize_references(text, elf))
+                references.extend(self._normalize_indirect_references(text, elf))
+                jump_tables.extend(self._normalize_jump_tables(text, elf))
         finally:
             common.GlobalConfig.ENDIAN = old_endian
             common.GlobalConfig.ABI = old_abi
 
         functions.sort(key=lambda item: (item.address, item.name))
         references = self._deduplicate_references(references)
+        jump_tables = self._deduplicate_jump_tables(jump_tables)
         symbols = self._normalize_symbols(context, elf, seed_addresses)
         strings = self._detect_strings(elf, references)
         assembly_sections.sort(key=lambda item: (item.address, item.name))
@@ -129,6 +134,7 @@ class SpimdisasmAdapter:
             symbols=symbols,
             references=references,
             strings=strings,
+            jump_tables=jump_tables,
             assembly_sections=assembly_sections,
             warnings=warnings,
         )
@@ -164,8 +170,6 @@ class SpimdisasmAdapter:
             if section.addr <= address < section.addr + section.size:
                 return section
         return None
-
-
 
     @classmethod
     def _detect_strings(cls, elf: ElfImage, references: list[ReferenceRecord]) -> list[StringRecord]:
@@ -227,6 +231,72 @@ class SpimdisasmAdapter:
         return records
 
     @classmethod
+    def _normalize_indirect_references(cls, text, elf: ElfImage) -> list[ReferenceRecord]:
+        records: list[ReferenceRecord] = []
+        for function in text.symbolList:
+            name = function.getNameUnquoted()
+            analyzer = function.instrAnalyzer
+            for local_offset, target in analyzer.indirectFunctionCallIntrOffset.items():
+                records.append(
+                    cls._make_reference(
+                        function.vram + local_offset,
+                        target,
+                        "indirect_call",
+                        name,
+                        elf,
+                    )
+                )
+        return records
+
+    @classmethod
+    def _normalize_jump_tables(cls, text, elf: ElfImage) -> list[JumpTableRecord]:
+        records: list[JumpTableRecord] = []
+        for function in text.symbolList:
+            analyzer = function.instrAnalyzer
+            accepted_addresses = set(analyzer.referencedJumpTableOffsets.values())
+            for local_offset, table_address in analyzer.jumpRegisterIntrOffset.items():
+                if table_address not in accepted_addresses:
+                    continue
+                targets = cls._decode_jump_table_targets(elf, table_address)
+                if len(targets) < 2:
+                    continue
+                records.append(
+                    JumpTableRecord(
+                        address=table_address,
+                        source_function=function.getNameUnquoted(),
+                        source_address=function.vram + local_offset,
+                        targets=targets,
+                    )
+                )
+        return records
+
+    @classmethod
+    def _decode_jump_table_targets(
+        cls,
+        elf: ElfImage,
+        address: int,
+        max_entries: int = 256,
+    ) -> list[int]:
+        table_section = cls._find_section(elf, address)
+        if table_section is None or table_section.type == 8 or table_section.kind == "executable":
+            return []
+        offset = elf.vaddr_to_offset(address)
+        if offset is None:
+            return []
+        section_end = min(table_section.offset + table_section.size, len(elf.raw_data))
+        targets: list[int] = []
+        for index in range(max_entries):
+            entry_offset = offset + index * 4
+            if entry_offset + 4 > section_end:
+                break
+            target = int.from_bytes(elf.raw_data[entry_offset : entry_offset + 4], "little")
+            target_section = cls._find_section(elf, target)
+            if target_section is None or target_section.kind != "executable":
+                break
+            targets.append(target)
+        return targets
+
+    @classmethod
     def _make_reference(
         cls,
         source_address: int,
@@ -251,6 +321,17 @@ class SpimdisasmAdapter:
             key = (record.source_address, record.target_address, record.kind, record.source_function)
             unique[key] = record
         return sorted(unique.values(), key=lambda item: (item.source_address, item.target_address, item.kind))
+
+    @staticmethod
+    def _deduplicate_jump_tables(records: list[JumpTableRecord]) -> list[JumpTableRecord]:
+        unique: dict[tuple[int, str, int], JumpTableRecord] = {}
+        for record in records:
+            key = (record.address, record.source_function, record.source_address)
+            unique[key] = record
+        return sorted(
+            unique.values(),
+            key=lambda item: (item.address, item.source_address, item.source_function),
+        )
 
     @classmethod
     def _normalize_symbols(cls, context, elf: ElfImage, seed_addresses: set[int]) -> list[SymbolRecord]:
