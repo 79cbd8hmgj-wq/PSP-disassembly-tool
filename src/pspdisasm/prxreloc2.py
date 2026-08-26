@@ -173,6 +173,8 @@ def decode_prxreloc2(
             offset_mode = flag & 0x06
             if offset_mode == 0x00:
                 relocation_base = command >> (flag_bits + seg_bits)
+            elif offset_mode == 0x04:
+                relocation_base = reader.read_u32("absolute state base")
             else:
                 raise ParseError(
                     f"unsupported PT_PRXRELOC2 state offset mode 0x{offset_mode:02X}"
