@@ -12,7 +12,10 @@ JPEG = b"\xff\xd8\xff\xe0\x00\x04AB\xff\xd9"
 RIFF_WAVE = b"RIFF" + (16).to_bytes(4, "little") + b"WAVEfmt " + (4).to_bytes(4, "little") + b"\x01\x00\x01\x00"
 RIFF_ATRAC = b"RIFF" + (16).to_bytes(4, "little") + b"WAVEfmt " + (4).to_bytes(4, "little") + b"\x70\x02\x02\x00"
 GIM = b"MIG.00.1PSP\x00" + b"\x00" * 20
-PSMF = b"PSMF" + b"\x00" * 28
+
+
+def _psmf(stream_offset: int = 0x800, stream_size: int = 0x1000, version: bytes = b"0015") -> bytes:
+    return b"PSMF" + version + stream_offset.to_bytes(4, "big") + stream_size.to_bytes(4, "big") + b"\x00" * 16
 
 
 def _vag(payload_size: int = 16, sample_rate: int = 44100) -> bytes:
@@ -134,8 +137,17 @@ def test_gim_and_psmf_are_conservative_non_extractable_records():
     gim = _analyze(GIM).assets[0]
     assert (gim.format, gim.kind, gim.size, gim.extractable, gim.confidence) == ("gim", "image", None, False, 0.9)
 
-    psmf = _analyze(PSMF).assets[0]
-    assert (psmf.format, psmf.kind, psmf.size, psmf.extractable, psmf.confidence) == ("pmf", "video", None, False, 0.9)
+    psmf = _analyze(_psmf()).assets[0]
+    assert (psmf.format, psmf.kind, psmf.size, psmf.extractable, psmf.confidence) == ("pmf", "video", None, False, 0.95)
+    assert psmf.metadata == {"stream_offset": 0x800, "stream_size": 0x1000, "version": "0015"}
+
+
+def test_psmf_rejects_invalid_version_offset_and_zero_stream_size():
+    assert _analyze(b"PSMF" + b"\x00" * 28).assets == []
+    assert _analyze(_psmf(version=b"9999")).assets == []
+    assert _analyze(_psmf(stream_offset=0x801)).assets == []
+    assert _analyze(_psmf(stream_offset=0)).assets == []
+    assert _analyze(_psmf(stream_size=0)).assets == []
 
 
 def test_scans_unaligned_signatures_but_not_executable_or_nobits_sections():
