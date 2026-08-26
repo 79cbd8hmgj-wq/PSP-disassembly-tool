@@ -155,3 +155,89 @@ def test_validated_outer_asset_suppresses_overlapping_nested_signature():
     result = _analyze(riff)
     assert len(result.assets) == 1
     assert result.assets[0].format == "wav"
+
+
+def test_result_preserves_source_name_and_links_direct_reference_exactly():
+    disassembly = model.DisassemblyResult(
+        "fixture.elf",
+        references=[
+            model.ReferenceRecord(0x08800100, BASE, "data", "func_08800100", ".rodata"),
+            model.ReferenceRecord(0x08800104, BASE + 1, "data", "func_08800100", ".rodata"),
+        ],
+    )
+    result = _analyze(PNG, disassembly=disassembly)
+    assert result.source_name == "fixture.elf"
+    assert len(result.references) == 1
+    reference = result.references[0]
+    assert (reference.source_address, reference.asset_address, reference.reference_kind) == (0x08800100, BASE, "direct")
+    assert reference.confidence == 1.0
+    assert "reference_record" in reference.evidence
+
+
+def test_links_typed_reference_and_caps_confidence_to_existing_evidence():
+    typing = model.DataTypingResult(
+        "fixture.elf",
+        typed_references=[
+            model.TypedReferenceRecord(
+                0x08800200,
+                BASE,
+                "pointer",
+                "func_08800200",
+                ".rodata",
+                "pointer",
+                0.93,
+                ["typed_pointer"],
+            )
+        ],
+    )
+    result = _analyze(PNG, typing=typing)
+    assert len(result.references) == 1
+    reference = result.references[0]
+    assert reference.reference_kind == "typed"
+    assert reference.confidence == 0.93
+    assert reference.evidence == ["asset_exact_start", "typed_pointer", "typed_reference"]
+
+
+def test_links_typed_data_target_and_ignores_unrelated_pointer_values():
+    typing = model.DataTypingResult(
+        "fixture.elf",
+        data_types=[
+            model.DataTypeRecord(
+                address=0x08800300,
+                section=".data",
+                type_name="pointer",
+                size=4,
+                target_address=BASE,
+                confidence=0.91,
+                evidence=["safe relocation"],
+            ),
+            model.DataTypeRecord(
+                address=0x08800304,
+                section=".data",
+                type_name="pointer",
+                size=4,
+                target_address=BASE + 4,
+                confidence=0.99,
+                evidence=["other pointer"],
+            ),
+        ],
+    )
+    result = _analyze(PNG, typing=typing)
+    assert len(result.references) == 1
+    reference = result.references[0]
+    assert (reference.source_address, reference.reference_kind, reference.confidence) == (0x08800300, "typed_data", 0.91)
+
+
+def test_duplicate_typed_reference_evidence_deduplicates_deterministically():
+    duplicate_a = model.TypedReferenceRecord(
+        0x08800400, BASE, "pointer", None, ".rodata", "pointer", 0.90, ["zeta", "shared"]
+    )
+    duplicate_b = model.TypedReferenceRecord(
+        0x08800400, BASE, "pointer", None, ".rodata", "pointer", 0.95, ["alpha", "shared"]
+    )
+    typing = model.DataTypingResult("fixture.elf", typed_references=[duplicate_a, duplicate_b])
+    result = _analyze(PNG, typing=typing)
+    assert len(result.references) == 1
+    reference = result.references[0]
+    assert reference.confidence == 0.95
+    assert reference.evidence == ["alpha", "asset_exact_start", "shared", "typed_reference", "zeta"]
