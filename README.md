@@ -2,7 +2,7 @@
 
 `pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, matching, and whole-game resource-analysis toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of combining upstream projects into one fork.
 
-## Current status: Phase 7C
+## Current status: Phase 7D
 
 The implemented pipeline now covers:
 
@@ -15,6 +15,7 @@ The implemented pipeline now covers:
 7. ISO/CSO whole-disc intake.
 8. Automatic game-wide module analysis/linking.
 9. Whole-disc resource extraction, classification, and conservative embedded-resource discovery.
+10. Deterministic unknown-container fingerprinting, family grouping, and safe parser-driven entry extraction.
 
 ## Implemented phases
 
@@ -119,9 +120,24 @@ The implemented pipeline now covers:
 - Physically extract only bounded embedded resources whose complete byte extent is proven.
 - Keep larger files inventoried while skipping their full embedded scan with a warning.
 - Emit deterministic game-resource JSON and CSV reports.
-- Provide a `ResourceContainerParser` extension boundary for future title-specific archive parsers without shipping speculative universal `.BIN/.DAT/.ARC/.PAC/.PAK/.PKG` decoders.
+- Provide a parser extension boundary without shipping speculative universal `.BIN/.DAT/.ARC/.PAC/.PAK/.PKG` decoders.
 
 See [`docs/phase7c-game-resources.md`](docs/phase7c-game-resources.md) for the detailed Phase 7C behavior and safety boundaries.
+
+### Phase 7D — proprietary container intelligence
+
+- Fingerprint every unknown loose resource without changing its classification from `unknown`.
+- Record a 16-byte prefix, printable prefix view, bounded entropy, size, suffix hint, and existing embedded-resource evidence.
+- Group repeated unknown files deterministically by normalized suffix plus the first four content bytes.
+- Accept trusted title-specific parsers through the Python API while keeping the built-in proprietary parser set empty.
+- Select parsers only from explicit confidence `>= 0.90`, with deterministic tie-breaking and invalid-probe isolation.
+- Validate parser-provided inner paths and byte ranges before extraction.
+- Keep traversal/symlink escapes fatal while out-of-bounds ranges and parser-local failures become warnings.
+- Stream exact accepted byte ranges beneath `resources/containers/<parent>/<inner-path>`.
+- Reclassify extracted entries through the shared Phase 6D/7C content detector layer.
+- Preserve parent path, parser, inner path, offset, size, and detection provenance in deterministic reports.
+
+See [`docs/phase7d-container-intelligence.md`](docs/phase7d-container-intelligence.md) for the parser API, report schemas, and safety boundaries.
 
 ## Installation
 
@@ -176,7 +192,7 @@ pspdisasm game-project game.iso game_decomp
 pspdisasm game-project game.cso game_decomp --nid-db psp_nids.csv
 ```
 
-`game-project` automatically runs Phase 7A, Phase 7B, and Phase 7C.
+`game-project` automatically runs Phase 7A, Phase 7B, Phase 7C, and the built-in Phase 7D unknown-container profiling pass. Trusted title-specific parsers can additionally be supplied through the Python API.
 
 Typical output:
 
@@ -189,9 +205,13 @@ game_decomp/
 │   ├── module_links.json
 │   ├── propagated_symbols.json
 │   ├── game_resources.json
-│   └── embedded_resources.json
+│   ├── embedded_resources.json
+│   ├── container_candidates.json
+│   └── container_inspections.json
 ├── reports/
-│   └── game_resources.csv
+│   ├── game_resources.csv
+│   ├── container_candidates.csv
+│   └── container_entries.csv
 ├── modules/
 │   └── PSP_GAME/... executable candidates ...
 ├── projects/
@@ -199,8 +219,10 @@ game_decomp/
 └── resources/
     ├── files/
     │   └── PSP_GAME/... loose disc resources ...
-    └── embedded/
-        └── PSP_GAME/.../<OFFSET>_<format>.<ext>
+    ├── embedded/
+    │   └── PSP_GAME/.../<OFFSET>_<format>.<ext>
+    └── containers/
+        └── PSP_GAME/.../<container>/<inner-path>
 ```
 
 The CLI summary reports executable/module counts plus:
@@ -208,7 +230,10 @@ The CLI summary reports executable/module counts plus:
 - total resource files;
 - known-format resource files;
 - unknown resource files;
-- embedded resources discovered.
+- embedded resources discovered;
+- unknown container candidates;
+- containers inspected by supplied parsers;
+- accepted/extracted container entries.
 
 ### Analyze one executable
 
@@ -326,8 +351,13 @@ Representative public entry points:
 
 ```python
 from pspdisasm import (
+    ContainerCandidateProfile,
+    ContainerEntry,
+    ContainerFamily,
+    ContainerInspection,
     ModuleAnalysisInput,
     NidDatabase,
+    ResourceContainerParser,
     analyze_advanced,
     analyze_assets,
     analyze_bytes,
@@ -339,26 +369,30 @@ from pspdisasm import (
     disassemble_file,
     generate_game_project,
     generate_project,
+    group_container_families,
     link_modules,
     load_nid_databases,
     match_project_function,
+    profile_container_candidate,
     scan_game_disc,
+    select_container_parser,
 )
 ```
 
-`generate_game_project()` is the high-level whole-game API. `analyze_game_resources()` is the Phase 7C API for already-extracted `DiscResourceRecord` values.
+`generate_game_project()` is the high-level whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values.
 
 ## Resource-analysis safety model
 
-A signature alone does not authorize arbitrary carving.
+A signature or extension alone does not authorize arbitrary carving.
 
 - Known loose files require an accepted content match at offset zero.
 - Phase 6D/7C format detection uses confidence thresholds and structural validation.
 - Bounded extraction requires a complete in-range extent.
-- Unknown proprietary containers remain unknown.
+- Unknown proprietary containers remain unknown unless a supplied parser explicitly probes at confidence `>= 0.90`.
+- Phase 7D still validates every parser-provided entry path and byte range independently.
 - Full embedded scanning is capped at 64 MiB per loose resource file.
 - Traversal and symlink escapes from output roots are fatal.
-- Ordinary malformed/unsupported resources are isolated and recorded rather than aborting the complete game run.
+- Ordinary malformed/unsupported resources, parser failures, and invalid byte ranges are isolated and recorded rather than aborting the complete game run.
 
 ## Upstream tool roles
 
@@ -379,8 +413,9 @@ A signature alone does not authorize arbitrary carving.
 - No `PT_PRXRELOC2` decompression/application yet.
 - No bundled PSP NID database.
 - No direct PSPLibDoc XML or PPSSPP source parser.
-- No universal parser for proprietary game archives/containers.
-- Phase 7C does not transcode textures, models, audio, or video.
+- No universal parser for proprietary game archives/containers; Phase 7D requires an evidence-backed supplied parser for title-specific decoding.
+- No recursive nested proprietary-container unpacking yet.
+- Phase 7C/7D do not transcode textures, models, audio, or video.
 - Phase 6D/7C conservatively recognize GIM/PMF candidates but only extract when a complete extent is proven.
 - No game-wide asset-to-code relationship is claimed without direct evidence.
 - m2c does not understand every PSP Allegrex/VFPU instruction.
@@ -397,4 +432,4 @@ python -m pip install -e '.[analysis,disc]' pytest
 PYTHONPATH=src python -m pytest -q
 ```
 
-The GitHub Actions workflow runs the same implemented dependency set on pushes and pull requests. Tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, CSO, and resource structures; no commercial game data is included.
+The GitHub Actions workflow runs the same implemented dependency set on pushes and pull requests. Tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, CSO, resource, and container structures; no commercial game data is included.

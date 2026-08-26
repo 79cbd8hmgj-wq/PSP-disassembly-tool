@@ -8,6 +8,7 @@ import pytest
 import pspdisasm.game_resources as game_resources
 from pspdisasm.disc import DiscResourceRecord
 from pspdisasm.game_resources import analyze_game_resources
+from pspdisasm.resource_containers import ContainerEntry, ContainerInspection
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x00IEND\xaeB`\x82"
@@ -119,3 +120,185 @@ def test_analyze_game_resources_rejects_unsafe_extracted_paths(tmp_path):
 
     with pytest.raises(ValueError, match="Unsafe game resource path"):
         analyze_game_resources("game.iso", output, records)
+
+
+def test_analyze_game_resources_profiles_unknown_container_families(tmp_path):
+    output = tmp_path / "project"
+    records = [
+        _resource(output, "PSP_GAME/USRDIR/B.DAT", b"PACKbbbb"),
+        _resource(output, "PSP_GAME/USRDIR/TEXTURE.PNG", PNG),
+        _resource(output, "PSP_GAME/USRDIR/A.DAT", b"PACKaaaa"),
+    ]
+
+    analysis = analyze_game_resources("game.iso", output, records)
+
+    assert [profile.path for profile in analysis.container_candidates] == [
+        "PSP_GAME/USRDIR/A.DAT",
+        "PSP_GAME/USRDIR/B.DAT",
+    ]
+    assert len(analysis.container_families) == 1
+    family = analysis.container_families[0]
+    assert family.family_key == ".dat:5041434b"
+    assert family.member_paths == [
+        "PSP_GAME/USRDIR/A.DAT",
+        "PSP_GAME/USRDIR/B.DAT",
+    ]
+
+    candidate_json = json.loads(
+        (output / "metadata/container_candidates.json").read_text(encoding="utf-8")
+    )
+    assert [record["path"] for record in candidate_json] == [
+        "PSP_GAME/USRDIR/A.DAT",
+        "PSP_GAME/USRDIR/B.DAT",
+    ]
+    with (output / "reports/container_candidates.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["path"] for row in rows] == [
+        "PSP_GAME/USRDIR/A.DAT",
+        "PSP_GAME/USRDIR/B.DAT",
+    ]
+
+
+class _SyntheticContainerParser:
+    name = "synthetic-pack"
+
+    def __init__(self, entries: list[ContainerEntry] | None = None, *, fail_inspect: bool = False):
+        self.entries = entries or []
+        self.fail_inspect = fail_inspect
+
+    def probe(self, prefix: bytes, path: str) -> float:
+        return 0.99 if prefix.startswith(b"PACK") else 0.0
+
+    def inspect(self, path):
+        if self.fail_inspect:
+            raise RuntimeError("synthetic inspect failure")
+        return ContainerInspection(
+            parser_name=self.name,
+            format_name="synthetic_pack",
+            confidence=0.99,
+            entries=list(self.entries),
+        )
+
+
+def test_analyze_game_resources_extracts_and_classifies_bounded_container_entry(tmp_path):
+    output = tmp_path / "project"
+    payload = b"PACK" + PNG + b"TAIL"
+    records = [_resource(output, "PSP_GAME/USRDIR/DATA.DAT", payload)]
+    parser = _SyntheticContainerParser(
+        [ContainerEntry(path="textures/icon.png", offset=4, size=len(PNG))]
+    )
+
+    analysis = analyze_game_resources(
+        "game.iso",
+        output,
+        records,
+        container_parsers=[parser],
+    )
+
+    assert len(analysis.container_inspections) == 1
+    inspection = analysis.container_inspections[0]
+    assert (inspection.parser_name, inspection.format_name, inspection.confidence) == (
+        "synthetic-pack",
+        "synthetic_pack",
+        0.99,
+    )
+    assert len(analysis.container_entries) == 1
+    entry = analysis.container_entries[0]
+    assert (entry.parent_path, entry.inner_path, entry.offset, entry.size) == (
+        "PSP_GAME/USRDIR/DATA.DAT",
+        "textures/icon.png",
+        4,
+        len(PNG),
+    )
+    assert entry.detected_format == "png"
+    assert entry.kind == "image"
+    assert entry.extracted_path == (
+        "resources/containers/PSP_GAME/USRDIR/DATA.DAT/textures/icon.png"
+    )
+    assert (output / entry.extracted_path).read_bytes() == PNG
+    assert analysis.resources[0].container_parser == "synthetic-pack"
+    assert analysis.resources[0].container_entry_count == 1
+
+    inspections_json = json.loads(
+        (output / "metadata/container_inspections.json").read_text(encoding="utf-8")
+    )
+    assert inspections_json[0]["parser_name"] == "synthetic-pack"
+    with (output / "reports/container_entries.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["inner_path"] == "textures/icon.png"
+
+
+def test_analyze_game_resources_rejects_out_of_bounds_entry_as_warning(tmp_path):
+    output = tmp_path / "project"
+    payload = b"PACKpayload"
+    records = [_resource(output, "PSP_GAME/USRDIR/DATA.DAT", payload)]
+    parser = _SyntheticContainerParser(
+        [ContainerEntry(path="bad.bin", offset=4, size=999)]
+    )
+
+    analysis = analyze_game_resources(
+        "game.iso",
+        output,
+        records,
+        container_parsers=[parser],
+    )
+
+    assert analysis.container_entries == []
+    assert any("out of bounds" in warning.lower() for warning in analysis.resources[0].warnings)
+    assert not (output / "resources/containers/PSP_GAME/USRDIR/DATA.DAT/bad.bin").exists()
+
+
+def test_analyze_game_resources_isolates_container_inspect_failure(tmp_path):
+    output = tmp_path / "project"
+    records = [_resource(output, "PSP_GAME/USRDIR/DATA.DAT", b"PACKpayload")]
+
+    analysis = analyze_game_resources(
+        "game.iso",
+        output,
+        records,
+        container_parsers=[_SyntheticContainerParser(fail_inspect=True)],
+    )
+
+    assert analysis.container_inspections == []
+    assert analysis.container_entries == []
+    assert any("inspect failed" in warning.lower() for warning in analysis.resources[0].warnings)
+
+
+def test_analyze_game_resources_rejects_unsafe_container_entry_path(tmp_path):
+    output = tmp_path / "project"
+    records = [_resource(output, "PSP_GAME/USRDIR/DATA.DAT", b"PACKpayload")]
+    parser = _SyntheticContainerParser(
+        [ContainerEntry(path="../escape.bin", offset=4, size=4)]
+    )
+
+    with pytest.raises(ValueError, match="Unsafe container entry path"):
+        analyze_game_resources(
+            "game.iso",
+            output,
+            records,
+            container_parsers=[parser],
+        )
+
+
+def test_analyze_game_resources_limits_total_extracted_container_bytes(tmp_path):
+    output = tmp_path / "project"
+    payload = b"PACK" + b"abcdefgh"
+    records = [_resource(output, "PSP_GAME/USRDIR/DATA.DAT", payload)]
+    parser = _SyntheticContainerParser(
+        [
+            ContainerEntry(path="first.bin", offset=4, size=8),
+            ContainerEntry(path="duplicate.bin", offset=4, size=8),
+        ]
+    )
+
+    analysis = analyze_game_resources(
+        "game.iso",
+        output,
+        records,
+        container_parsers=[parser],
+    )
+
+    assert len(analysis.container_entries) == 1
+    assert analysis.container_entries[0].inner_path == "first.bin"
+    assert any("extraction budget" in warning.lower() for warning in analysis.resources[0].warnings)
+    assert not (output / "resources/containers/PSP_GAME/USRDIR/DATA.DAT/duplicate.bin").exists()

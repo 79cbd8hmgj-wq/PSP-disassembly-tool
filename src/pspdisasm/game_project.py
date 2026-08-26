@@ -14,6 +14,7 @@ from .linker import ModuleAnalysisInput, link_modules
 from .model import ModuleLinkAnalysis
 from .nids import load_nid_databases
 from .project import generate_project
+from .resource_containers import ResourceContainerParser
 
 
 @dataclass(slots=True)
@@ -57,7 +58,11 @@ class GameProjectResult:
     known_resource_count: int = 0
     unknown_resource_count: int = 0
     embedded_resource_count: int = 0
+    container_candidate_count: int = 0
+    container_inspection_count: int = 0
+    container_entry_count: int = 0
     resources_path: Path | None = None
+    containers_path: Path | None = None
 
 
 def _safe_relative_target(root: Path, relative_path: str) -> Path:
@@ -93,14 +98,21 @@ def generate_game_project(
     output_dir: Path | str,
     *,
     nid_databases: Iterable[Path | str] = (),
+    container_parsers: Iterable[ResourceContainerParser] = (),
 ) -> GameProjectResult:
     source_path = Path(source)
     output = Path(output_dir)
     database_paths = tuple(nid_databases)
+    parsers = tuple(container_parsers)
     manifest = scan_game_disc(source_path, output)
 
     resource_files = extract_disc_resources(source_path, output, manifest=manifest)
-    resource_analysis = analyze_game_resources(str(source_path), output, resource_files)
+    resource_analysis = analyze_game_resources(
+        str(source_path),
+        output,
+        resource_files,
+        container_parsers=parsers,
+    )
 
     module_records: list[GameModuleAnalysisRecord] = []
     link_units: list[ModuleAnalysisInput] = []
@@ -198,6 +210,7 @@ def generate_game_project(
     analysis_path = output / "metadata" / "game_analysis.json"
     links_path = output / "metadata" / "module_links.json"
     resources_path = output / "metadata" / "game_resources.json"
+    containers_path = output / "metadata" / "container_candidates.json"
     _write_json(analysis_path, asdict(analysis))
     _write_json(links_path, asdict(links))
     _write_json(
@@ -222,5 +235,9 @@ def generate_game_project(
         known_resource_count=known_resource_count,
         unknown_resource_count=resource_count - known_resource_count,
         embedded_resource_count=len(resource_analysis.embedded_resources),
+        container_candidate_count=len(resource_analysis.container_candidates),
+        container_inspection_count=len(resource_analysis.container_inspections),
+        container_entry_count=len(resource_analysis.container_entries),
         resources_path=resources_path,
+        containers_path=containers_path,
     )
