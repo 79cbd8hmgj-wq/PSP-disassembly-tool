@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from pspdisasm import prxreloc2
 from pspdisasm.errors import ParseError
 from pspdisasm.model import ElfHeader, ElfImage, ProgramHeader, Relocation
 from pspdisasm.prxreloc2 import decode_prxreloc2
@@ -36,6 +37,30 @@ def _reloc2_elf(stream: bytes) -> tuple[bytes, ElfImage]:
         ProgramHeader(2, PT_PRXRELOC2, reloc_offset, 0, 0, len(stream), len(stream), 4, 4),
     ]
     return bytes(blob), ElfImage(header, "little", program_headers, [], bytes(blob))
+
+
+def _word_relocation(reloc_type: int, *, addend: int | None = 0) -> Relocation:
+    names = {
+        0: "R_MIPS_NONE",
+        1: "R_MIPS_16",
+        2: "R_MIPS_32",
+        4: "R_MIPS_26",
+        5: "R_MIPS_HI16",
+        6: "R_MIPS_LO16",
+        14: "R_MIPS_X_J26",
+        15: "R_MIPS_X_JAL26",
+    }
+    return Relocation(
+        section="PT_PRXRELOC2[2]",
+        offset=0,
+        info=reloc_type,
+        type=reloc_type,
+        type_name=names.get(reloc_type, f"TYPE_{reloc_type}"),
+        symbol_index=0,
+        target_section_index=None,
+        source="program_header_rel2",
+        addend=addend,
+    )
 
 
 def test_relocation_keeps_legacy_constructor_and_adds_optional_prxreloc2_provenance():
@@ -204,3 +229,48 @@ def test_decode_prxreloc2_rejects_source_word_outside_segment_memsz():
     data, elf = _reloc2_elf(stream)
     with pytest.raises(ParseError, match="cannot address a 32-bit word"):
         decode_prxreloc2(data, elf, 2)
+
+
+def test_apply_psp_relocation_word_none_is_identity():
+    assert prxreloc2.apply_psp_relocation_word(0x12345678, _word_relocation(0), 0x1000) == 0x12345678
+
+
+def test_apply_psp_relocation_word_r_mips_32_wraps_to_u32():
+    assert prxreloc2.apply_psp_relocation_word(0xFFFFFFF0, _word_relocation(2), 0x20) == 0x00000010
+
+
+@pytest.mark.parametrize("reloc_type", [1, 6])
+def test_apply_psp_relocation_word_16_and_lo16_preserve_upper_half(reloc_type: int):
+    assert prxreloc2.apply_psp_relocation_word(0x2408FFF0, _word_relocation(reloc_type), 0x20) == 0x24080010
+
+
+def test_apply_psp_relocation_word_r_mips_26_preserves_opcode():
+    assert prxreloc2.apply_psp_relocation_word(0x0C000001, _word_relocation(4), 0x20) == 0x0C000009
+
+
+def test_apply_psp_relocation_word_x_j26_forces_jump_opcode():
+    assert prxreloc2.apply_psp_relocation_word(0x0C000001, _word_relocation(14), 0x20) == 0x08000009
+
+
+def test_apply_psp_relocation_word_x_jal26_forces_jal_opcode():
+    assert prxreloc2.apply_psp_relocation_word(0x08000001, _word_relocation(15), 0x20) == 0x0C000009
+
+
+def test_apply_psp_relocation_word_hi16_uses_low_half_and_carry():
+    relocation = _word_relocation(5, addend=0x7FFF)
+    assert prxreloc2.apply_psp_relocation_word(0x3C081234, relocation, 1) == 0x3C081235
+
+
+def test_apply_psp_relocation_word_hi16_rejects_unresolved_low_half():
+    with pytest.raises(ParseError, match="HI16"):
+        prxreloc2.apply_psp_relocation_word(0x3C081234, _word_relocation(5, addend=None), 1)
+
+
+def test_apply_psp_relocation_word_hi16_accepts_explicit_override():
+    relocation = _word_relocation(5, addend=None)
+    assert prxreloc2.apply_psp_relocation_word(0x3C081234, relocation, 1, lo16=0x7FFF) == 0x3C081235
+
+
+def test_apply_psp_relocation_word_rejects_unsupported_type():
+    with pytest.raises(ParseError, match="unsupported PSP relocation type"):
+        prxreloc2.apply_psp_relocation_word(0, _word_relocation(99), 0)
