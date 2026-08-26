@@ -127,6 +127,52 @@ class NidSymbol:
 
 
 @dataclass(slots=True)
+class NidResolution:
+    module: str
+    library: str
+    nid: int
+    name: str
+    kind: str
+    address: int
+    direction: str
+    source: str
+
+
+@dataclass(slots=True)
+class ModuleLink:
+    importing_module: str
+    exporting_module: str
+    library: str
+    nid: int
+    name: str
+    kind: str
+    import_address: int
+    export_address: int
+    name_source: str
+
+
+@dataclass(slots=True)
+class PropagatedSymbol:
+    module: str
+    address: int
+    name: str
+    kind: str
+    library: str
+    nid: int
+    source: str
+    confidence: float
+
+
+@dataclass(slots=True)
+class ModuleLinkAnalysis:
+    modules: list[str] = field(default_factory=list)
+    resolutions: list[NidResolution] = field(default_factory=list)
+    links: list[ModuleLink] = field(default_factory=list)
+    propagated_symbols: list[PropagatedSymbol] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class LibraryImport:
     name: str
     flags: int
