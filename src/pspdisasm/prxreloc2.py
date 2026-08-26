@@ -114,6 +114,10 @@ def _signed_extended_delta(command: int, shift: int, low_half: int) -> int:
     return (high << 16) | low_half
 
 
+def _signed_u16(value: int) -> int:
+    return value - 0x10000 if value & 0x8000 else value
+
+
 def decode_prxreloc2(
     data: bytes,
     elf: ElfImage,
@@ -218,7 +222,11 @@ def decode_prxreloc2(
             )
 
         lo16_mode = flag & 0x38
-        if lo16_mode != 0x00:
+        if lo16_mode == 0x00:
+            addend: int | None = 0
+        elif lo16_mode == 0x10:
+            addend = _signed_u16(reader.read_u16("HI16 low-half addend"))
+        else:
             raise ParseError(
                 f"unsupported PT_PRXRELOC2 lo16 mode 0x{lo16_mode:02X}"
             )
@@ -237,7 +245,7 @@ def decode_prxreloc2(
                 source_segment_index=source_segment_index,
                 target_segment_index=segment_index,
                 stream_offset=command_stream_offset,
-                addend=0,
+                addend=addend,
                 encoding_flags=flag,
             )
         )
