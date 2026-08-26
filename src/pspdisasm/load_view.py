@@ -93,6 +93,18 @@ def _contains_address(segment: ProgramHeader, address: int) -> bool:
     return segment.vaddr <= address < segment.vaddr + segment.memsz
 
 
+def _rebase_loaded_address(elf: ElfImage, address: int, delta: int) -> int:
+    if any(_contains_address(segment, address) for segment in _loaded_segments(elf)):
+        return (address + delta) & 0xFFFFFFFF
+    return address
+
+
+def _rebase_nonzero_loaded_address(elf: ElfImage, address: int, delta: int) -> int:
+    if address == 0:
+        return 0
+    return _rebase_loaded_address(elf, address, delta)
+
+
 def _rebase_elf(elf: ElfImage, data: bytes, delta: int) -> ElfImage:
     original_loads = _loaded_segments(elf)
     entry = elf.header.entry
@@ -125,12 +137,49 @@ def _rebase_elf(elf: ElfImage, data: bytes, delta: int) -> ElfImage:
     )
 
 
-def _rebase_model(model: ExecutableModel, relocated_elf: ElfImage) -> ExecutableModel:
+def _rebase_nid_entry(entry, elf: ElfImage, delta: int):
+    return replace(
+        entry,
+        address=_rebase_nonzero_loaded_address(elf, entry.address, delta),
+        nid_address=_rebase_nonzero_loaded_address(elf, entry.nid_address, delta),
+    )
+
+
+def _rebase_library(library, elf: ElfImage, delta: int):
+    return replace(
+        library,
+        address=_rebase_loaded_address(elf, library.address, delta),
+        functions=[_rebase_nid_entry(entry, elf, delta) for entry in library.functions],
+        variables=[_rebase_nid_entry(entry, elf, delta) for entry in library.variables],
+    )
+
+
+def _rebase_model(
+    model: ExecutableModel,
+    original_elf: ElfImage,
+    relocated_elf: ElfImage,
+    delta: int,
+) -> ExecutableModel:
+    module_info = model.module_info
+    if module_info is not None:
+        module_info = replace(
+            module_info,
+            gp_value=_rebase_nonzero_loaded_address(original_elf, module_info.gp_value, delta),
+            exports_start=_rebase_nonzero_loaded_address(original_elf, module_info.exports_start, delta),
+            exports_end=_rebase_nonzero_loaded_address(original_elf, module_info.exports_end, delta),
+            imports_start=_rebase_nonzero_loaded_address(original_elf, module_info.imports_start, delta),
+            imports_end=_rebase_nonzero_loaded_address(original_elf, module_info.imports_end, delta),
+            address=_rebase_loaded_address(original_elf, module_info.address, delta),
+        )
+
     return replace(
         model,
         elf_header=relocated_elf.header,
         program_headers=relocated_elf.program_headers,
         sections=relocated_elf.sections,
+        module_info=module_info,
+        imports=[_rebase_library(library, original_elf, delta) for library in model.imports],
+        exports=[_rebase_library(library, original_elf, delta) for library in model.exports],
         relocations=[replace(relocation) for relocation in model.relocations],
         warnings=list(model.warnings),
     )
@@ -186,7 +235,7 @@ def build_relocated_load_view(
         applied += 1
 
     relocated_elf = _rebase_elf(elf, bytes(patched), delta)
-    relocated_model = _rebase_model(model, relocated_elf)
+    relocated_model = _rebase_model(model, elf, relocated_elf, delta)
     return RelocatedLoadView(
         load_address=load_address,
         original_image_base=original_image_base,
