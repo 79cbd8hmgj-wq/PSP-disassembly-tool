@@ -92,11 +92,12 @@ def _score_functions(
             score -= 0.10
             evidence.append("unimplemented instruction")
 
+        stable_score = round(max(0.0, min(1.0, score)), 2)
         records.append(
             FunctionConfidence(
                 name=function.name,
                 address=function.address,
-                score=max(0.0, min(1.0, score)),
+                score=stable_score,
                 evidence=evidence,
             )
         )
