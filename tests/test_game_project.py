@@ -13,6 +13,7 @@ from pspdisasm.disc import GameDiscManifest, GameModuleRecord
 from pspdisasm.errors import DisassemblyError
 from pspdisasm.linker import ModuleAnalysisInput
 from pspdisasm.model import ModuleLinkAnalysis
+from pspdisasm.resource_containers import ContainerEntry, ContainerInspection
 from tests.fixtures import build_allegrex_elf32, build_psp_container_header
 
 
@@ -239,9 +240,58 @@ def test_generate_game_project_analyzes_whole_disc_resources(tmp_path):
     assert result.known_resource_count == 1
     assert result.unknown_resource_count == 1
     assert result.embedded_resource_count == 0
+    assert result.container_candidate_count == 1
+    assert result.container_inspection_count == 0
+    assert result.container_entry_count == 0
     assert result.resources_path == output / "metadata" / "game_resources.json"
+    assert result.containers_path == output / "metadata" / "container_candidates.json"
     assert (output / "metadata/game_resources.json").exists()
     assert (output / "metadata/embedded_resources.json").exists()
+    assert (output / "metadata/container_candidates.json").exists()
+    assert (output / "metadata/container_inspections.json").exists()
     assert (output / "reports/game_resources.csv").exists()
+    assert (output / "reports/container_candidates.csv").exists()
+    assert (output / "reports/container_entries.csv").exists()
     assert (output / "resources/files/PSP_GAME/USRDIR/TEXTURE.PNG").read_bytes() == PNG
     assert (output / "resources/files/PSP_GAME/USRDIR/DATA.BIN").read_bytes() == b"opaque proprietary payload"
+
+
+class _PackParser:
+    name = "synthetic-pack"
+
+    def probe(self, prefix: bytes, path: str) -> float:
+        return 0.99 if prefix.startswith(b"PACK") else 0.0
+
+    def inspect(self, path):
+        return ContainerInspection(
+            parser_name=self.name,
+            format_name="synthetic_pack",
+            confidence=0.99,
+            entries=[ContainerEntry(path="textures/icon.png", offset=4, size=len(PNG))],
+        )
+
+
+def test_generate_game_project_forwards_custom_container_parsers(tmp_path):
+    image = tmp_path / "containers.iso"
+    output = tmp_path / "container_decomp"
+    _build_game_iso(
+        image,
+        eboot=build_allegrex_elf32(),
+        resources={
+            "PSP_GAME/USRDIR/DATA.DAT": b"PACK" + PNG,
+        },
+    )
+
+    result = generate_game_project(
+        image,
+        output,
+        container_parsers=[_PackParser()],
+    )
+
+    assert result.container_candidate_count == 1
+    assert result.container_inspection_count == 1
+    assert result.container_entry_count == 1
+    assert (
+        output
+        / "resources/containers/PSP_GAME/USRDIR/DATA.DAT/textures/icon.png"
+    ).read_bytes() == PNG
