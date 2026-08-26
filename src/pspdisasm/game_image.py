@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Protocol
 import struct
 import zlib
@@ -390,6 +390,34 @@ def _walk_iso(
             _walk_iso(reader, parsed, path, entries, records, visited)
 
 
+def _index_image(reader: _ImageReader) -> tuple[list[GameImageFile], dict[str, _IsoDirectoryRecord]]:
+    root = _parse_primary_volume(reader)
+    entries: list[GameImageFile] = []
+    records: dict[str, _IsoDirectoryRecord] = {}
+    _walk_iso(reader, root, "", entries, records, set())
+    return entries, records
+
+
+def _normalize_disc_path(path: str) -> str:
+    if not path or "\\" in path:
+        raise ParseError("Disc path must be a non-empty POSIX path")
+    candidate = PurePosixPath(path)
+    if any(part in (".", "..") for part in candidate.parts):
+        raise ParseError("Disc path traversal components are not allowed")
+    normalized = "/" + "/".join(part for part in candidate.parts if part != "/")
+    if normalized == "/":
+        raise ParseError("Disc path must identify a file")
+    return normalized.upper()
+
+
+def _safe_output_path(output_dir: Path, disc_path: str) -> Path:
+    candidate = PurePosixPath(disc_path)
+    parts = [part for part in candidate.parts if part != "/"]
+    if not parts or any(part in (".", "..", "") for part in parts):
+        raise ParseError(f"Unsafe disc path cannot be extracted: {disc_path!r}")
+    return output_dir.joinpath(*parts)
+
+
 def _read_record_prefix(reader: _ImageReader, record: _IsoDirectoryRecord, size: int = 4) -> bytes:
     return reader.read(record.extent * ISO_SECTOR_SIZE, min(size, record.size))
 
@@ -429,14 +457,38 @@ def _discover_executables(
     return executables, boot_path
 
 
+def read_game_file(path: Path | str, disc_path: str) -> bytes:
+    source = Path(path)
+    normalized = _normalize_disc_path(disc_path)
+    reader = _open_image_reader(source)
+    try:
+        _entries, records = _index_image(reader)
+        record = records.get(normalized)
+        if record is None:
+            raise ParseError(f"File not found in game image: {disc_path}")
+        return _read_record(reader, record)
+    finally:
+        reader.close()
+
+
+def extract_game_executables(path: Path | str, output_dir: Path | str) -> list[Path]:
+    source = Path(path)
+    destination = Path(output_dir)
+    analysis = analyze_game_image(source)
+    extracted: list[Path] = []
+    for executable in analysis.executables:
+        target = _safe_output_path(destination, executable.path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(read_game_file(source, executable.path))
+        extracted.append(target)
+    return extracted
+
+
 def analyze_game_image(path: Path | str) -> GameImageAnalysis:
     source = Path(path)
     reader = _open_image_reader(source)
     try:
-        root = _parse_primary_volume(reader)
-        entries: list[GameImageFile] = []
-        records: dict[str, _IsoDirectoryRecord] = {}
-        _walk_iso(reader, root, "", entries, records, set())
+        entries, records = _index_image(reader)
         executables, boot_path = _discover_executables(reader, entries, records)
         warnings: list[str] = []
         param_sfo: dict[str, object] = {}
