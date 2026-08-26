@@ -2,9 +2,9 @@
 
 `pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, and matching toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of merging the upstream projects into one fork.
 
-## Current status: Phase 7A
+## Current status: Phase 7B
 
-The toolkit covers the original five executable workflow layers, four advanced-analysis layers, and the first whole-game disc-intake layer.
+The toolkit covers the original five executable workflow layers, four advanced-analysis layers, whole-disc intake, and automatic game-wide module orchestration.
 
 ### Phase 1 — PSP executable intelligence
 
@@ -104,9 +104,23 @@ The toolkit covers the original five executable workflow layers, four advanced-a
 - Prefer a valid executable `PSP_GAME/SYSDIR/EBOOT.BIN`, with a valid `BOOT.BIN` fallback.
 - Inventory the full filesystem while distinguishing boot executable, module candidates, metadata, and resources.
 - Extract only executable candidates, with containment checks preventing disc paths from escaping the output `modules/` root.
-- Emit deterministic `metadata/disc.json` and `metadata/param_sfo.json` for the next orchestration phase.
+- Emit deterministic `metadata/disc.json` and `metadata/param_sfo.json` for later analysis.
 
-Phase 7A intentionally stops at disc discovery and executable extraction. Phase 7B will feed those extracted modules through the existing analysis/project/linking layers and build a unified game-wide analysis workspace.
+Phase 7A remains the lightweight scan/extraction layer. Use it when you want a disc inventory without automatically creating per-module decompilation workspaces.
+
+### Phase 7B — game-wide module analysis and orchestration
+
+- Feed every Phase 7A executable candidate through the existing PSP analyzer in deterministic disc-path order.
+- Record encrypted `~PSP` candidates as `needs_decryption` without pretending their encrypted bodies can be analyzed.
+- Disassemble every usable decrypted ELF/PRX candidate with the existing Allegrex/VFPU pipeline.
+- Generate a normal Splat decompilation workspace for each analyzed module beneath a mirrored `projects/<logical-disc-path>/` hierarchy.
+- Isolate module-local parsing, disassembly, and project-generation failures so one bad secondary module does not abort analysis of the rest of the game.
+- Run one game-wide Phase 6B import/export linker pass across all successfully analyzed decrypted modules.
+- Apply optional repeatable NID databases consistently to per-module projects and the game-wide linker.
+- Emit deterministic `metadata/game_analysis.json`, `metadata/module_links.json`, and `metadata/propagated_symbols.json` reports.
+- Preserve containment checks for both extracted modules and mirrored project paths.
+
+Phase 7B completes automatic executable/module orchestration for a PSP game image. Recursive proprietary resource/archive analysis and game-wide asset conversion remain later phases.
 
 ## Installation
 
@@ -168,6 +182,39 @@ game_intake/
 ```
 
 Encrypted `~PSP` files are still extracted and identified as PSP containers, but their encrypted bodies are not decrypted by Phase 7A.
+
+### Analyze an entire PSP game image
+
+```bash
+pspdisasm game-project game.iso game_decomp
+pspdisasm game-project game.cso game_decomp --nid-db psp_nids.csv
+```
+
+Phase 7B performs Phase 7A intake first, then analyzes every usable decrypted executable candidate, creates per-module projects, and runs a single game-wide linker pass:
+
+```text
+game_decomp/
+├── metadata/
+│   ├── disc.json
+│   ├── param_sfo.json
+│   ├── game_analysis.json
+│   ├── module_links.json
+│   └── propagated_symbols.json
+├── modules/
+│   └── PSP_GAME/
+│       ├── SYSDIR/EBOOT.BIN
+│       └── USRDIR/... extracted PRX candidates ...
+└── projects/
+    └── PSP_GAME/
+        ├── SYSDIR/
+        │   └── EBOOT.BIN/
+        │       └── ... normal Splat workspace ...
+        └── USRDIR/
+            └── MODULE.PRX/
+                └── ... normal Splat workspace ...
+```
+
+Each candidate is reported as `analyzed`, `needs_decryption`, or `failed`. Encrypted modules and isolated module-local failures remain explicit in `game_analysis.json` without preventing valid decrypted modules from completing.
 
 ### Analyze
 
@@ -388,7 +435,7 @@ The public package exposes:
 from pspdisasm import ModuleAnalysisInput, NidDatabase, link_modules, load_nid_databases
 ```
 
-`link_modules` operates on normalized `ExecutableModel`/`DisassemblyResult` inputs and does not mutate either model. This makes its cross-module analysis usable by CLI workflows, project generators, and future ROM-wide orchestrators.
+`link_modules` operates on normalized `ExecutableModel`/`DisassemblyResult` inputs and does not mutate either model. This makes its cross-module analysis usable by CLI workflows, project generators, and whole-game orchestrators.
 
 ## Phase 6C Python API and artifacts
 
@@ -448,7 +495,28 @@ The manifest records:
 - extracted executable candidates and their output paths;
 - non-fatal metadata warnings.
 
-Phase 7A does not automatically disassemble every extracted module or build a unified cross-module project; that is the Phase 7B boundary.
+Use Phase 7A directly when only scan/extraction is needed; Phase 7B composes this manifest into the full module-analysis workflow.
+
+## Phase 7B Python API and artifacts
+
+The package exposes:
+
+```python
+from pspdisasm import generate_game_project
+```
+
+`generate_game_project(source, output_dir, nid_databases=())` performs Phase 7A intake, analyzes every usable decrypted executable candidate, generates mirrored per-module projects, and links the successfully analyzed module set.
+
+It writes:
+
+- `metadata/game_analysis.json` — authoritative whole-game module status, counts, warnings, and normalized linker result;
+- `metadata/module_links.json` — the standalone game-wide `ModuleLinkAnalysis`;
+- `metadata/propagated_symbols.json` — game-wide propagated symbol suggestions;
+- `projects/<logical-disc-path>/` — one normal Splat workspace for each module with status `analyzed`.
+
+Module statuses are explicit: `analyzed`, `needs_decryption`, or `failed`. Module-local parse/disassembly/project failures are isolated, while missing global analysis engines remain fatal.
+
+See `docs/phase7b-game-analysis.md` for the full orchestration boundary and output layout.
 
 ## Reference-object design and limitation
 
@@ -479,12 +547,15 @@ A matching score is meaningful only when the candidate is compiled with the appr
 - No `PT_PRXRELOC2` decompression/application yet.
 - No bundled PSP NID database; Phase 6B consumes external JSON/CSV data.
 - No direct PSPLibDoc XML or PPSSPP source parser yet.
-- Phase 7A inventories ISO/CSO files and extracts executable candidates but does not yet recursively run analysis/project generation across the full game; that is Phase 7B.
+- Phase 7B orchestrates executable modules across ISO/CSO images but does not recursively analyze arbitrary proprietary resource archives or containers.
+- Phase 7B does not yet reinject game-wide propagated names into every already-generated per-module `config/symbols.txt`.
 - Phase 6D does not transcode textures/models/audio, guess proprietary archives, or carve resources whose full extent cannot be validated.
 - m2c does not understand every PSP Allegrex/VFPU instruction.
 - Synthesized Phase 5 reference objects do not yet reproduce original relocation tables.
 - No automatic PSP compiler/version identification yet.
 - Phase 6C infers conservative structural candidates; it does not claim exact C struct/header or scalar-array recovery.
+- No ZSO/DAX disc input yet.
+- No parallel module-analysis scheduler yet.
 
 ## Development
 
