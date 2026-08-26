@@ -7,6 +7,10 @@ from pspdisasm.model import (
     ElfHeader,
     ElfImage,
     ExecutableModel,
+    LibraryExport,
+    LibraryImport,
+    ModuleInfo,
+    NidEntry,
     ProgramHeader,
     Relocation,
     Section,
@@ -35,7 +39,7 @@ def _single_segment_fixture(
     words: tuple[int, ...] = (0x10,),
     relocations: list[Relocation] | None = None,
 ) -> tuple[bytes, ElfImage, ExecutableModel]:
-    data = bytearray(0x140)
+    data = bytearray(0x180)
     for index, word in enumerate(words):
         struct.pack_into("<I", data, 0x100 + index * 4, word)
 
@@ -62,7 +66,7 @@ def _single_segment_fixture(
         vaddr=0,
         paddr=0,
         filesz=size,
-        memsz=size + 4,
+        memsz=max(size + 4, 0x80),
         flags=7,
         align=0x10,
     )
@@ -96,7 +100,7 @@ def _single_segment_fixture(
         elf_header=header,
         program_headers=[program_header],
         sections=[section],
-        relocations=relocations or [_type_a(0, 2)],
+        relocations=relocations if relocations is not None else [_type_a(0, 2)],
     )
     return bytes(data), elf, model
 
@@ -132,3 +136,57 @@ def test_type_a_hi16_uses_following_lo16_word_before_relocation():
     assert struct.unpack_from("<I", view.elf.raw_data, 0x100)[0] == 0x3C080880
     assert struct.unpack_from("<I", view.elf.raw_data, 0x104)[0] == 0x25084020
     assert view.applied_relocations == 2
+
+
+def test_relocated_load_view_rebases_loaded_prx_metadata_without_touching_external_values():
+    data, elf, model = _single_segment_fixture(words=(0,) * 16, relocations=[])
+    model.module_info = ModuleInfo(
+        attributes=0,
+        version=(1, 0),
+        name="fixture",
+        gp_value=0x10,
+        exports_start=0x20,
+        exports_end=0x28,
+        imports_start=0x30,
+        imports_end=0x38,
+        address=0x08,
+        location=".rodata.sceModuleInfo",
+    )
+    model.exports = [
+        LibraryExport(
+            name="FixtureEx",
+            flags=0,
+            entry_length=4,
+            function_count=1,
+            variable_count=1,
+            address=0x20,
+            functions=[NidEntry(0x11111111, 0x04, "function", 0x24)],
+            variables=[NidEntry(0x22222222, 0x1000, "variable", 0x28)],
+        )
+    ]
+    model.imports = [
+        LibraryImport(
+            name="FixtureIm",
+            flags=0,
+            entry_length=5,
+            function_count=1,
+            variable_count=0,
+            address=0x30,
+            functions=[NidEntry(0xAAAA0001, 0x14, "function", 0x34)],
+        )
+    ]
+
+    view = build_relocated_load_view(data, elf, model, load_address=0x08800000)
+
+    assert view.model.module_info is not None
+    assert view.model.module_info.address == 0x08800008
+    assert view.model.module_info.gp_value == 0x08800010
+    assert view.model.module_info.exports_start == 0x08800020
+    assert view.model.module_info.imports_end == 0x08800038
+    assert view.model.exports[0].address == 0x08800020
+    assert view.model.exports[0].functions[0].address == 0x08800004
+    assert view.model.exports[0].functions[0].nid_address == 0x08800024
+    assert view.model.exports[0].variables[0].address == 0x1000
+    assert view.model.imports[0].address == 0x08800030
+    assert view.model.imports[0].functions[0].address == 0x08800014
+    assert view.model.imports[0].functions[0].nid_address == 0x08800034
