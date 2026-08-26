@@ -17,6 +17,7 @@ _RELOC_NAMES = {
     4: "R_MIPS_26",
     5: "R_MIPS_HI16",
     6: "R_MIPS_LO16",
+    7: "R_MIPS_GPREL16",
     13: "R_MIPS_X_HI16",
     14: "R_MIPS_X_J26",
     15: "R_MIPS_X_JAL26",
@@ -134,7 +135,7 @@ def apply_psp_relocation_word(
     target_base &= 0xFFFFFFFF
     relocation_type = relocation.type
 
-    if relocation_type == 0:
+    if relocation_type in {0, 7}:
         return word
 
     if relocation_type == 2:
