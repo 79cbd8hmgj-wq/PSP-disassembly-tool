@@ -46,8 +46,8 @@ def test_parses_prx_module_info_imports_exports_and_relocations():
     assert type_b.source == "program_header_rel2"
     assert type_b.section == "PT_PRXRELOC2[1]"
     assert type_b.offset == 0
-    assert type_b.type == 0
-    assert type_b.type_name == "R_MIPS_NONE"
+    assert type_b.type == 1
+    assert type_b.type_name == "R_MIPS_16"
     assert type_b.source_segment_index == 0
     assert type_b.target_segment_index == 0
     assert not any("decoding is not implemented" in warning for warning in result.warnings)
