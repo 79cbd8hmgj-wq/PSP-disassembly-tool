@@ -14,7 +14,8 @@ def test_analyzes_prx_into_normalized_model():
     assert model.module_info.name == "TESTPRX"
     assert len(model.imports) == 1
     assert len(model.exports) == 1
-    assert len(model.relocations) == 1
+    assert len(model.relocations) == 2
+    assert [reloc.source for reloc in model.relocations] == ["section", "program_header_rel2"]
 
 
 def test_analyzes_standard_mips_elf_without_prx_metadata():
