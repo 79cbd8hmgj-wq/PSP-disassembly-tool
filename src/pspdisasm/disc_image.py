@@ -82,7 +82,9 @@ class CsoReader(io.RawIOBase):
         if version == 2 and unused != b"\0\0":
             raise ParseError("CISO v2 reserved header bytes must be zero")
 
-        index_offset = header_size if header_size >= _CSO_HEADER.size else _CSO_HEADER.size
+        # Legacy CISO v0/v1 writers did not reliably populate header_size.
+        # Their index table is defined directly after the 0x18-byte header.
+        index_offset = _CSO_HEADER.size if version <= 1 else header_size
         if index_offset > file_size:
             raise ParseError("CISO header size exceeds file size")
         block_count = (uncompressed_size + block_size - 1) // block_size
@@ -105,7 +107,7 @@ class CsoReader(io.RawIOBase):
         if version == 2 and indexes[-1] & _INDEX_FLAG:
             raise ParseError("CISO v2 final index entry must not set the compression flag")
 
-        return CsoHeader(index_offset, uncompressed_size, block_size, version, index_shift), indexes, file_size
+        return CsoHeader(header_size, uncompressed_size, block_size, version, index_shift), indexes, file_size
 
     def readable(self) -> bool:
         return True
@@ -192,6 +194,10 @@ class CsoReader(io.RawIOBase):
         if self.header.version <= 1:
             is_plain = bool(current & _INDEX_FLAG)
             if is_plain:
+                if stored_size < expected_size:
+                    raise ParseError(
+                        f"CISO uncompressed block {block_index} spans {stored_size} bytes; expected at least {expected_size}"
+                    )
                 block = self._fp.read(expected_size)
             else:
                 stored = self._fp.read(stored_size)
@@ -243,6 +249,10 @@ class CsoReader(io.RawIOBase):
                 "CISO v2 uses LZ4 compression; install pspdisasm with the 'disc' extra"
             ) from exc
 
+        # The index span can include up to (2**index_shift - 1) bytes of
+        # alignment padding. Python's LZ4 block API requires an exact input
+        # length, unlike maxcso's partial decoder, so try only the legal
+        # padding window and accept the first exact-size decode.
         max_padding = min((1 << index_shift) - 1 if index_shift else 0, max(0, len(data) - 1))
         first_error: Exception | None = None
         for padding in range(max_padding + 1):
