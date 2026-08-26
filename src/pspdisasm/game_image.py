@@ -14,6 +14,11 @@ ISO_PRIMARY_VOLUME_DESCRIPTOR_SECTOR = 16
 CSO_HEADER_SIZE = 24
 CSO_INDEX_MASK = 0x7FFFFFFF
 CSO_INDEX_UNCOMPRESSED = 0x80000000
+SFO_HEADER_SIZE = 20
+SFO_INDEX_SIZE = 16
+SFO_FORMAT_BINARY = 0x0004
+SFO_FORMAT_UTF8 = 0x0204
+SFO_FORMAT_UINT32 = 0x0404
 
 
 @dataclass(slots=True)
@@ -202,6 +207,64 @@ class _IsoDirectoryRecord:
     size: int
     is_directory: bool
     identifier: bytes
+
+
+def parse_param_sfo(data: bytes) -> dict[str, object]:
+    if len(data) < SFO_HEADER_SIZE:
+        raise ParseError("Truncated PARAM.SFO header")
+    magic, _version, key_table_start, data_table_start, entry_count = struct.unpack_from("<4sIIII", data, 0)
+    if magic != b"\x00PSF":
+        raise ParseError("Invalid PARAM.SFO magic")
+
+    index_end = SFO_HEADER_SIZE + entry_count * SFO_INDEX_SIZE
+    if index_end > len(data):
+        raise ParseError("Truncated PARAM.SFO entry table")
+    if key_table_start < index_end or data_table_start < key_table_start or data_table_start > len(data):
+        raise ParseError("Invalid PARAM.SFO table offsets")
+
+    result: dict[str, object] = {}
+    for entry_index in range(entry_count):
+        entry_offset = SFO_HEADER_SIZE + entry_index * SFO_INDEX_SIZE
+        key_offset, data_format, data_length, data_max_length, data_offset = struct.unpack_from(
+            "<HHIII", data, entry_offset
+        )
+        if data_length > data_max_length:
+            raise ParseError("PARAM.SFO entry length exceeds its declared maximum")
+
+        key_position = key_table_start + key_offset
+        if not key_table_start <= key_position < data_table_start:
+            raise ParseError("PARAM.SFO key offset lies outside the key table")
+        key_end = data.find(b"\x00", key_position, data_table_start)
+        if key_end < 0:
+            raise ParseError("PARAM.SFO key is not NUL-terminated")
+        try:
+            key = data[key_position:key_end].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ParseError("PARAM.SFO key is not valid UTF-8") from exc
+        if not key:
+            raise ParseError("PARAM.SFO contains an empty key")
+
+        value_start = data_table_start + data_offset
+        value_end = value_start + data_length
+        if value_start < data_table_start or value_end > len(data):
+            raise ParseError(f"PARAM.SFO value for {key!r} extends beyond the file")
+        value = data[value_start:value_end]
+
+        if data_format == SFO_FORMAT_UTF8:
+            string_bytes = value.split(b"\x00", 1)[0]
+            try:
+                decoded: object = string_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ParseError(f"PARAM.SFO value for {key!r} is not valid UTF-8") from exc
+        elif data_format == SFO_FORMAT_UINT32:
+            if data_length != 4:
+                raise ParseError(f"PARAM.SFO integer value for {key!r} is not four bytes")
+            decoded = int.from_bytes(value, "little")
+        else:
+            decoded = value.hex()
+        result[key] = decoded
+
+    return dict(sorted(result.items()))
 
 
 def _open_image_reader(path: Path) -> _ImageReader:
