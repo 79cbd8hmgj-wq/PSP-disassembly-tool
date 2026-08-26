@@ -377,6 +377,40 @@ class DataTypingResult:
 
 
 @dataclass(slots=True)
+class AssetRecord:
+    address: int
+    file_offset: int
+    section: str
+    format: str
+    kind: str
+    size: int | None
+    confidence: float
+    evidence: list[str] = field(default_factory=list)
+    extractable: bool = False
+    suggested_extension: str | None = None
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class AssetReferenceRecord:
+    source_address: int
+    asset_address: int
+    source_function: str | None
+    reference_kind: str
+    asset_format: str
+    confidence: float
+    evidence: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AssetDiscoveryResult:
+    source_name: str
+    assets: list[AssetRecord] = field(default_factory=list)
+    references: list[AssetReferenceRecord] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class AssemblySection:
     name: str
     address: int
