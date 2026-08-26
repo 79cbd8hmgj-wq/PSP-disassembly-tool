@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import yaml
@@ -51,6 +52,10 @@ def test_generate_project_materializes_workspace(tmp_path: Path):
         "metadata/symbols.json",
         "metadata/references.json",
         "metadata/strings.json",
+        "metadata/advanced.json",
+        "metadata/callgraph.json",
+        "metadata/jump_tables.json",
+        "metadata/function_confidence.json",
         "asm/text.s",
     }
     for relative in expected:
@@ -58,6 +63,30 @@ def test_generate_project_materializes_workspace(tmp_path: Path):
     assert (output / "src").is_dir()
     assert (output / "build").is_dir()
     assert (output / "reports").is_dir()
+
+    callgraph = json.loads((output / "metadata" / "callgraph.json").read_text(encoding="utf-8"))
+    assert callgraph == [
+        {
+            "kind": "direct",
+            "source_address": 0x08800004,
+            "source_function": "func_08800000",
+            "target_address": 0x08800028,
+            "target_function": "func_08800028",
+        }
+    ]
+
+    confidence = json.loads((output / "metadata" / "function_confidence.json").read_text(encoding="utf-8"))
+    assert [entry["address"] for entry in confidence] == [0x08800000, 0x08800028]
+    assert confidence[0]["score"] == 0.85
+    assert confidence[1]["score"] == 0.70
+
+    jump_tables = json.loads((output / "metadata" / "jump_tables.json").read_text(encoding="utf-8"))
+    assert jump_tables == []
+
+    advanced = json.loads((output / "metadata" / "advanced.json").read_text(encoding="utf-8"))
+    assert advanced["call_edges"] == callgraph
+    assert advanced["function_confidence"] == confidence
+    assert advanced["jump_tables"] == jump_tables
 
 
 def test_project_rejects_encrypted_psp_container():
