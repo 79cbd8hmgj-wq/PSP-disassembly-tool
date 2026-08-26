@@ -118,6 +118,15 @@ class NidEntry:
 
 
 @dataclass(slots=True)
+class NidSymbol:
+    library: str
+    nid: int
+    name: str
+    kind: str
+    source: str
+
+
+@dataclass(slots=True)
 class LibraryImport:
     name: str
     flags: int
