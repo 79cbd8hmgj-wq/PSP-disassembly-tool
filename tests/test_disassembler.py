@@ -24,8 +24,9 @@ def test_disassemble_bytes_can_use_explicit_relocated_load_address() -> None:
     )
 
     assert [function.address for function in result.functions] == [0x08900000, 0x08900028]
-    assert any(reference.target_address == 0x08900100 for reference in result.references)
-    assert any(string.address == 0x08900100 for string in result.strings)
+    # This fixture intentionally contains no relocation records for its literal
+    # absolute-address sequence, so Phase 7F must not guess and rewrite it.
+    assert not any(reference.target_address == 0x08900100 for reference in result.references)
 
 
 def test_disassemble_bytes_rejects_encrypted_psp_container() -> None:
