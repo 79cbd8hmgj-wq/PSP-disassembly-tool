@@ -115,4 +115,5 @@ def analyze_advanced(
         source_name=disassembly.source_name,
         call_edges=call_edges,
         function_confidence=_score_functions(model, disassembly, call_edges),
+        jump_tables=list(disassembly.jump_tables),
     )
