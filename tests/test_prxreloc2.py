@@ -110,3 +110,18 @@ def test_decode_prxreloc2_extended_negative_delta():
     relocations = decode_prxreloc2(data, elf, 2)
 
     assert [reloc.offset for reloc in relocations] == [4]
+
+
+def test_decode_prxreloc2_absolute_state_base():
+    stream = bytes.fromhex(
+        "00 00 02 01"
+        "03 04 01"     # state flag 0x04 => absolute u32 base; reloc flag 0x01
+        "02 02"
+        "01 00 08 00 00 00"  # source segment 0, absolute base 8
+        "4E 00"              # target segment 1, R_MIPS_32, compact +4 delta
+    )
+    data, elf = _reloc2_elf(stream)
+
+    relocations = decode_prxreloc2(data, elf, 2)
+
+    assert [reloc.offset for reloc in relocations] == [12]
