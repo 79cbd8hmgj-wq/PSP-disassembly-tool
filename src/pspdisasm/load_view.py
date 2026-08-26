@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from .errors import ParseError
-from .model import ElfImage, ExecutableModel, ProgramHeader
+from .model import ElfImage, ExecutableModel, ProgramHeader, Relocation
 from .prxreloc2 import apply_psp_relocation_word
 
 
@@ -26,10 +26,17 @@ def _loaded_segments(elf: ElfImage) -> list[ProgramHeader]:
     return [segment for segment in elf.program_headers if segment.type == PT_LOAD and segment.memsz > 0]
 
 
-def _segment_index(relocation, shift: int, explicit: int | None) -> int:
+def _segment_index(relocation: Relocation, shift: int, explicit: int | None) -> int:
     if explicit is not None:
         return explicit
     return (relocation.info >> shift) & 0xFF
+
+
+def _relocation_segments(relocation: Relocation) -> tuple[int, int]:
+    return (
+        _segment_index(relocation, 8, relocation.source_segment_index),
+        _segment_index(relocation, 16, relocation.target_segment_index),
+    )
 
 
 def _segment(elf: ElfImage, index: int, role: str) -> ProgramHeader:
@@ -39,6 +46,47 @@ def _segment(elf: ElfImage, index: int, role: str) -> ProgramHeader:
     if segment.type != PT_LOAD:
         raise ParseError(f"Relocation {role} segment {index} is not PT_LOAD")
     return segment
+
+
+def _source_file_offset(elf: ElfImage, relocation: Relocation) -> tuple[int, int]:
+    source_index, _ = _relocation_segments(relocation)
+    source = _segment(elf, source_index, "source")
+    if relocation.offset < 0 or relocation.offset + 4 > source.filesz:
+        raise ParseError(
+            f"Relocation source offset 0x{relocation.offset:X} is not a complete file-backed word "
+            f"inside PT_LOAD segment {source_index}"
+        )
+    return source_index, source.offset + relocation.offset
+
+
+def _signed_low_half(word: int) -> int:
+    value = word & 0xFFFF
+    return value - 0x10000 if value & 0x8000 else value
+
+
+def _type_a_hi16_low_half(
+    data: bytes,
+    elf: ElfImage,
+    relocations: list[Relocation],
+    index: int,
+) -> int | None:
+    relocation = relocations[index]
+    if relocation.type != 5 or relocation.source == "program_header_rel2":
+        return None
+    source_index, target_index = _relocation_segments(relocation)
+    for candidate in relocations[index + 1 :]:
+        if candidate.type == 5:
+            continue
+        if candidate.type not in {1, 6}:
+            continue
+        candidate_source, candidate_target = _relocation_segments(candidate)
+        if (candidate_source, candidate_target) != (source_index, target_index):
+            continue
+        _, file_offset = _source_file_offset(elf, candidate)
+        if file_offset < 0 or file_offset + 4 > len(data):
+            raise ParseError("Type-A HI16 companion word extends beyond the input")
+        return _signed_low_half(int.from_bytes(data[file_offset : file_offset + 4], "little"))
+    return None
 
 
 def _contains_address(segment: ProgramHeader, address: int) -> bool:
@@ -105,10 +153,7 @@ def build_relocated_load_view(
         raise ParseError("Relocated PSP load view requires at least one PT_LOAD segment")
 
     original_image_base = min(segment.vaddr for segment in loads)
-    if load_address < original_image_base:
-        delta = load_address - original_image_base
-    else:
-        delta = load_address - original_image_base
+    delta = load_address - original_image_base
     if not -(1 << 32) < delta < (1 << 32):
         raise ParseError("PSP relocation delta is outside the supported 32-bit range")
 
@@ -118,27 +163,24 @@ def build_relocated_load_view(
     }
     patched = bytearray(data)
     applied = 0
+    relocations = list(model.relocations)
 
-    for relocation in model.relocations:
-        source_index = _segment_index(relocation, 8, relocation.source_segment_index)
-        target_index = _segment_index(relocation, 16, relocation.target_segment_index)
-        source = _segment(elf, source_index, "source")
+    for index, relocation in enumerate(relocations):
+        source_index, target_index = _relocation_segments(relocation)
         _segment(elf, target_index, "target")
-
-        if relocation.offset < 0 or relocation.offset + 4 > source.filesz:
-            raise ParseError(
-                f"Relocation source offset 0x{relocation.offset:X} is not a complete file-backed word "
-                f"inside PT_LOAD segment {source_index}"
-            )
-        file_offset = source.offset + relocation.offset
+        _, file_offset = _source_file_offset(elf, relocation)
         if file_offset < 0 or file_offset + 4 > len(patched):
             raise ParseError("Relocation source word extends beyond the input")
 
         word = int.from_bytes(patched[file_offset : file_offset + 4], "little")
+        lo16 = None
+        if relocation.type == 5 and relocation.addend is None:
+            lo16 = _type_a_hi16_low_half(data, elf, relocations, index)
         relocated = apply_psp_relocation_word(
             word,
             relocation,
             segment_bases[target_index],
+            lo16=lo16,
         )
         patched[file_offset : file_offset + 4] = relocated.to_bytes(4, "little")
         applied += 1
