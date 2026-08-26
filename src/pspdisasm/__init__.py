@@ -13,6 +13,7 @@ from .linker import ModuleAnalysisInput, link_modules
 from .matcher import match_project_function
 from .nids import NidDatabase, load_nid_databases
 from .project import generate_project
+from .prxreloc2 import apply_psp_relocation_word, decode_prxreloc2
 from .resource_containers import (
     ContainerCandidateProfile,
     ContainerEntry,
@@ -40,6 +41,8 @@ __all__ = [
     "analyze_data_types",
     "analyze_file",
     "analyze_game_resources",
+    "apply_psp_relocation_word",
+    "decode_prxreloc2",
     "decompile_project_function",
     "disassemble_bytes",
     "disassemble_file",
