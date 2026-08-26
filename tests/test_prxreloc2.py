@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from pspdisasm.errors import ParseError
 from pspdisasm.model import ElfHeader, ElfImage, ProgramHeader, Relocation
 from pspdisasm.prxreloc2 import decode_prxreloc2
 
@@ -47,7 +48,6 @@ def test_relocation_keeps_legacy_constructor_and_adds_optional_prxreloc2_provena
         symbol_index=0,
         target_section_index=1,
     )
-
     assert legacy.source_segment_index is None
     assert legacy.target_segment_index is None
     assert legacy.stream_offset is None
@@ -56,13 +56,7 @@ def test_relocation_keeps_legacy_constructor_and_adds_optional_prxreloc2_provena
 
 
 def test_decode_prxreloc2_minimal_r_mips_32_stream():
-    stream = bytes.fromhex(
-        "00 00 02 01"
-        "03 00 01"
-        "02 02"
-        "01 00"
-        "4E 00"
-    )
+    stream = bytes.fromhex("00 00 02 01 03 00 01 02 02 01 00 4E 00")
     data, elf = _reloc2_elf(stream)
     relocations = decode_prxreloc2(data, elf, 2)
     assert len(relocations) == 1
@@ -80,7 +74,7 @@ def test_decode_prxreloc2_minimal_r_mips_32_stream():
 
 
 def test_decode_prxreloc2_extended_positive_delta():
-    stream = bytes.fromhex("00 00 02 01" "03 00 03" "02 02" "01 00" "0E 00 04 00")
+    stream = bytes.fromhex("00 00 02 01 03 00 03 02 02 01 00 0E 00 04 00")
     data, elf = _reloc2_elf(stream)
     relocations = decode_prxreloc2(data, elf, 2)
     assert [reloc.offset for reloc in relocations] == [4]
@@ -88,25 +82,21 @@ def test_decode_prxreloc2_extended_positive_delta():
 
 
 def test_decode_prxreloc2_extended_negative_delta():
-    stream = bytes.fromhex("00 00 02 01" "03 00 03" "02 02" "41 00" "FE FF FC FF")
+    stream = bytes.fromhex("00 00 02 01 03 00 03 02 02 41 00 FE FF FC FF")
     data, elf = _reloc2_elf(stream)
     relocations = decode_prxreloc2(data, elf, 2)
     assert [reloc.offset for reloc in relocations] == [4]
 
 
 def test_decode_prxreloc2_absolute_state_base():
-    stream = bytes.fromhex(
-        "00 00 02 01" "03 04 01" "02 02" "01 00 08 00 00 00" "4E 00"
-    )
+    stream = bytes.fromhex("00 00 02 01 03 04 01 02 02 01 00 08 00 00 00 4E 00")
     data, elf = _reloc2_elf(stream)
     relocations = decode_prxreloc2(data, elf, 2)
     assert [reloc.offset for reloc in relocations] == [12]
 
 
 def test_decode_prxreloc2_absolute_relocation_offset():
-    stream = bytes.fromhex(
-        "00 00 02 01" "03 00 05" "02 02" "01 00" "0E 00 0C 00 00 00"
-    )
+    stream = bytes.fromhex("00 00 02 01 03 00 05 02 02 01 00 0E 00 0C 00 00 00")
     data, elf = _reloc2_elf(stream)
     relocations = decode_prxreloc2(data, elf, 2)
     assert [reloc.offset for reloc in relocations] == [12]
@@ -126,35 +116,19 @@ def test_decode_prxreloc2_absolute_relocation_offset():
         (7, 15, "R_MIPS_X_JAL26"),
     ],
 )
-def test_decode_prxreloc2_maps_supported_compact_types(
-    compact_type: int,
-    normalized_type: int,
-    type_name: str,
-):
-    stream = bytes.fromhex("00 00 02 01" "03 00 01") + bytes(
-        [2, compact_type]
-    ) + bytes.fromhex("01 00 4E 00")
+def test_decode_prxreloc2_maps_supported_compact_types(compact_type: int, normalized_type: int, type_name: str):
+    stream = bytes.fromhex("00 00 02 01 03 00 01") + bytes([2, compact_type]) + bytes.fromhex("01 00 4E 00")
     data, elf = _reloc2_elf(stream)
-
     relocations = decode_prxreloc2(data, elf, 2)
-
     assert len(relocations) == 1
     assert relocations[0].type == normalized_type
     assert relocations[0].type_name == type_name
 
 
 def test_decode_prxreloc2_hi16_explicit_signed_low_half():
-    stream = bytes.fromhex(
-        "00 00 02 01"
-        "03 00 11"
-        "02 04"
-        "01 00"
-        "4E 00 FC FF"
-    )
+    stream = bytes.fromhex("00 00 02 01 03 00 11 02 04 01 00 4E 00 FC FF")
     data, elf = _reloc2_elf(stream)
-
     relocations = decode_prxreloc2(data, elf, 2)
-
     assert len(relocations) == 1
     assert relocations[0].type == 5
     assert relocations[0].type_name == "R_MIPS_HI16"
@@ -163,18 +137,70 @@ def test_decode_prxreloc2_hi16_explicit_signed_low_half():
 
 
 def test_decode_prxreloc2_hi16_reuse_state_remains_unresolved():
-    stream = bytes.fromhex(
-        "00 00 02 01"
-        "03 00 09"     # relocation flag 0x09 => reuse/ambiguous low-half state
-        "02 04"
-        "01 00"
-        "4E 00"
-    )
+    stream = bytes.fromhex("00 00 02 01 03 00 09 02 04 01 00 4E 00")
     data, elf = _reloc2_elf(stream)
-
     relocations = decode_prxreloc2(data, elf, 2)
-
     assert len(relocations) == 1
     assert relocations[0].type == 5
     assert relocations[0].addend is None
     assert relocations[0].encoding_flags == 0x09
+
+
+@pytest.mark.parametrize(
+    "stream_hex",
+    [
+        "00 00 02",
+        "00 00 02 01 03 00",
+        "00 00 02 01 03 00 01 02",
+        "00 00 02 01 03 00 01 02 02 01",
+        "00 00 02 01 03 00 03 02 02 01 00 0E 00",
+        "00 00 02 01 03 04 01 02 02 01 00 08 00",
+        "00 00 02 01 03 00 05 02 02 01 00 0E 00 0C 00",
+        "00 00 02 01 03 00 11 02 04 01 00 4E 00",
+    ],
+)
+def test_decode_prxreloc2_rejects_truncated_stream_components(stream_hex: str):
+    data, elf = _reloc2_elf(bytes.fromhex(stream_hex))
+    with pytest.raises(ParseError):
+        decode_prxreloc2(data, elf, 2)
+
+
+def test_decode_prxreloc2_rejects_command_bit_width_overflow():
+    data, elf = _reloc2_elf(bytes.fromhex("00 00 0F 02"))
+    with pytest.raises(ParseError, match="bit widths exceed 16 bits"):
+        decode_prxreloc2(data, elf, 2)
+
+
+@pytest.mark.parametrize(
+    "stream_hex",
+    [
+        "00 00 02 01 03 00 01 02 02 03 00",
+        "00 00 02 02 03 00 01 02 02 11 00",
+    ],
+)
+def test_decode_prxreloc2_rejects_lookup_table_index_overflow(stream_hex: str):
+    data, elf = _reloc2_elf(bytes.fromhex(stream_hex))
+    with pytest.raises(ParseError, match="table index"):
+        decode_prxreloc2(data, elf, 2)
+
+
+def test_decode_prxreloc2_rejects_non_load_target_segment():
+    data, elf = _reloc2_elf(bytes.fromhex("00 00 02 01 03 00 01 02 02 01 00 4E 00"))
+    elf.program_headers[1] = ProgramHeader(1, 0, 0x200, 0x100, 0x100, 0x20, 0x20, 6, 0x10)
+    with pytest.raises(ParseError, match="target segment 1 is not PT_LOAD"):
+        decode_prxreloc2(data, elf, 2)
+
+
+def test_decode_prxreloc2_rejects_non_load_source_segment():
+    stream = bytes.fromhex("00 00 02 01 03 00 01 02 02 05 00 4A 00")
+    data, elf = _reloc2_elf(stream)
+    elf.program_headers[1] = ProgramHeader(1, 0, 0x200, 0x100, 0x100, 0x20, 0x20, 6, 0x10)
+    with pytest.raises(ParseError, match="source segment 1 is not PT_LOAD"):
+        decode_prxreloc2(data, elf, 2)
+
+
+def test_decode_prxreloc2_rejects_source_word_outside_segment_memsz():
+    stream = bytes.fromhex("00 00 02 01 03 00 01 02 02 E1 00 4E 00")
+    data, elf = _reloc2_elf(stream)
+    with pytest.raises(ParseError, match="cannot address a 32-bit word"):
+        decode_prxreloc2(data, elf, 2)
