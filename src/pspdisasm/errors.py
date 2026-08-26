@@ -8,3 +8,11 @@ class EngineUnavailableError(RuntimeError):
 
 class DisassemblyError(RuntimeError):
     """Raised when instruction analysis cannot be completed safely."""
+
+
+class DecompilerUnavailableError(RuntimeError):
+    """Raised when the external assisted-decompilation backend cannot be located."""
+
+
+class DecompilationError(RuntimeError):
+    """Raised when assisted C decompilation cannot be completed safely."""

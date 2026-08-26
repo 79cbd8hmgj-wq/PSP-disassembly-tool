@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(slots=True)
@@ -246,3 +247,18 @@ class DisassemblyResult:
     strings: list[StringRecord] = field(default_factory=list)
     assembly_sections: list[AssemblySection] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DecompilationResult:
+    project_dir: Path
+    function_name: str
+    function_address: int
+    output_path: Path
+    assembly_path: Path
+    metadata_path: Path
+    backend_name: str
+    backend_version: str | None
+    target: str
+    warnings: list[str] = field(default_factory=list)
+    unsupported_instructions: list[str] = field(default_factory=list)

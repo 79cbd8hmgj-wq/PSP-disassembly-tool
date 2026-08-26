@@ -2,9 +2,9 @@
 
 `pspdisasm` is a PSP-focused executable-analysis and decompilation-orchestration toolkit. It adds PSP container/PRX intelligence around the Decompollaborate ecosystem instead of merging upstream projects into one fork.
 
-## Current status: Phase 3
+## Current status: Phase 4
 
-The project now covers three layers:
+The project now covers four layers:
 
 ### Phase 1 — PSP executable intelligence
 
@@ -30,6 +30,24 @@ The project now covers three layers:
 - Conservatively recognizes referenced NUL-terminated UTF-8 strings.
 - Emits deterministic JSON containing engine versions, functions, instructions, symbols, references, strings, and generated assembly.
 - Writes one `.s` file per executable section.
+
+### Phase 3 — Splat project generation
+
+- Flattens allocated ELF sections into a VRAM-linear `target.bin`.
+- Generates a PSP/GCC/little-endian `splat.yaml` following the supplied Splat 0.50.0 conventions.
+- Seeds entrypoint, discovered function, data, and recovered-string symbols.
+- Writes executable/disassembly/function/symbol/reference/string metadata into a reusable project workspace.
+
+### Phase 4 — assisted C decompilation
+
+- Adds `pspdisasm decompile PROJECT FUNCTION`.
+- Reads Phase 3 `metadata/functions.json` instead of repeating ELF analysis.
+- Runs **m2c** strictly out-of-process, preserving the MIT/GPL licensing boundary.
+- Defaults to `mipsel-gcc-c`, valid-syntax output, deterministic temporary names, and disabled m2c context caching.
+- Accepts optional preprocessed C context files with repeated `--context`.
+- Preserves the exact function assembly submitted to m2c.
+- Writes generated C under `src/nonmatching/` and trace metadata under `metadata/decompilations/`.
+- Detects m2c `M2C_ERROR` unknown-instruction markers and reports Allegrex/VFPU limitations without inventing semantics.
 
 ## Installation
 
@@ -135,8 +153,8 @@ The architecture keeps each source focused on what it already does well:
 - **Rabbitizer** — Allegrex/VFPU instruction decoding.
 - **spimdisasm** — MIPS/Allegrex function, symbol, and reference analysis.
 - **Splat** — PSP-aware project splitting/configuration conventions used by Phase 3 project generation.
-- **m2c** — optional approximate assembly-to-C backend in a later phase; kept out-of-process because of GPLv3.
-- **asm-differ** — recompilation/matching workflow in a later phase.
+- **m2c** — approximate assembly-to-C backend used by Phase 4; kept strictly out-of-process because of GPLv3.
+- **asm-differ** — recompilation/matching workflow planned for Phase 5.
 
 `pspdisasm` remains the PSP-specific orchestration and executable-intelligence layer around those components.
 
@@ -147,8 +165,9 @@ The architecture keeps each source focused on what it already does well:
 - No `PT_PRXRELOC2` decompression/application yet.
 - No NID-to-name database yet.
 - No ISO/CSO filesystem extraction yet.
-- No m2c or asm-differ command integration yet.
-- No high-level C recovery/type reconstruction yet.
+- No asm-differ/compiler matching integration yet.
+- m2c does not understand every PSP Allegrex/VFPU instruction; Phase 4 surfaces those instructions as explicit assisted-decompilation warnings.
+- No automatic high-level type/header reconstruction yet.
 
 ## Development
 
@@ -194,3 +213,43 @@ game_decomp/
 ```
 
 Phase 3 follows the supplied Splat 0.50.0 PSP conventions: `platform: psp`, little-endian MIPS, Rabbitizer's `R4000ALLEGREX` path, a `code` segment containing `asm`/data/rodata/BSS subsegments, and `symbol_addrs.txt`-style symbol declarations. The original ELF metadata is not fed to Splat as code; allocated ELF sections are normalized into a flat VRAM-linear `target.bin`, following Splat's ELF quickstart model.
+
+## Phase 4: m2c-assisted function decompilation
+
+Phase 4 works from a Phase 3 project. Select a function by name:
+
+```bash
+pspdisasm decompile game_decomp func_08812340 --m2c /path/to/m2c.py
+```
+
+Or by address:
+
+```bash
+pspdisasm decompile game_decomp 0x08812340 --m2c /path/to/m2c.py
+```
+
+The backend path can also be supplied through `PSPDISASM_M2C`, or omitted when an `m2c` executable is on `PATH`. A Python `m2c.py` path is launched with the current Python interpreter. `m2c` is intentionally **not** a `pspdisasm` package dependency and none of its GPLv3 implementation is imported or vendored.
+
+By default the generated artifacts are:
+
+```text
+game_decomp/
+├── asm/nonmatchings/func_08812340.s
+├── src/nonmatching/func_08812340.c
+└── metadata/decompilations/func_08812340.json
+```
+
+Pass preprocessed C context files through to m2c when types or prototypes are known:
+
+```bash
+pspdisasm decompile game_decomp func_08812340 \
+  --m2c /path/to/m2c.py \
+  --context include/game_context.i \
+  --context include/sdk_context.i
+```
+
+The default target is `mipsel-gcc-c`. An alternate m2c target can be selected with `--target`, and `--output` can override the C destination.
+
+### Allegrex/VFPU warning behavior
+
+The supplied m2c source accepts GNU-style MIPS assembly from spimdisasm, but generic m2c MIPS support does not provide semantics for every PSP-specific opcode. For example, a normal function from the synthetic PSP fixture decompiles to `return 1;`, while Allegrex `clz` and VFPU `vzero.s` are represented by m2c as `M2C_ERROR(/* unknown instruction: ... */)`. `pspdisasm` preserves that output and records each unsupported instruction in decompilation metadata. This is intentionally an assisted draft, not a claim that recovered C is source-correct or byte-matching.

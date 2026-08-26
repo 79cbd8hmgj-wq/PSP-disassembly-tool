@@ -9,7 +9,14 @@ from typing import Sequence
 
 from .analyzer import analyze_file, model_to_dict
 from .disassembler import disassemble_file, result_to_dict
-from .errors import DisassemblyError, EngineUnavailableError, ParseError
+from .decompiler import DEFAULT_M2C_TARGET, decompile_project_function
+from .errors import (
+    DecompilationError,
+    DecompilerUnavailableError,
+    DisassemblyError,
+    EngineUnavailableError,
+    ParseError,
+)
 from .model import DisassemblyResult, ExecutableModel
 from .project import generate_project
 
@@ -30,6 +37,14 @@ def _parser() -> argparse.ArgumentParser:
     project = sub.add_parser("project", help="Generate a Splat PSP decompilation workspace")
     project.add_argument("input", type=Path)
     project.add_argument("output", type=Path)
+
+    decompile = sub.add_parser("decompile", help="Generate an assisted C draft for one project function using m2c")
+    decompile.add_argument("project", type=Path)
+    decompile.add_argument("function", help="Function name, decimal address, or 0x hexadecimal address")
+    decompile.add_argument("--m2c", type=Path, metavar="PATH", help="Path to m2c executable or m2c.py")
+    decompile.add_argument("--context", type=Path, action="append", default=[], metavar="FILE", help="Preprocessed C context file; may be repeated")
+    decompile.add_argument("--output", type=Path, metavar="PATH", help="Override generated C output path")
+    decompile.add_argument("--target", default=DEFAULT_M2C_TARGET, metavar="TARGET", help=f"m2c target triple (default: {DEFAULT_M2C_TARGET})")
     return parser
 
 
@@ -141,7 +156,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Target size: 0x{result.target_size:X}")
             print(f"Splat config: {result.config_path}")
             return 0
-    except (OSError, ParseError, EngineUnavailableError, DisassemblyError) as exc:
+
+        if args.command == "decompile":
+            result = decompile_project_function(
+                args.project,
+                args.function,
+                m2c_path=args.m2c,
+                contexts=args.context,
+                output_path=args.output,
+                target=args.target,
+            )
+            project_dir = result.project_dir
+            try:
+                c_display = result.output_path.relative_to(project_dir)
+                metadata_display = result.metadata_path.relative_to(project_dir)
+            except ValueError:
+                c_display = result.output_path
+                metadata_display = result.metadata_path
+            print(f"Function: {result.function_name} @ 0x{result.function_address:08X}")
+            print(f"C draft: {c_display}")
+            print(f"Metadata: {metadata_display}")
+            if result.backend_version:
+                print(f"Backend: {result.backend_name} {result.backend_version}")
+            else:
+                print(f"Backend: {result.backend_name}")
+            for warning in result.warnings:
+                print(f"Warning: {warning}")
+            return 0
+    except (
+        OSError,
+        ParseError,
+        EngineUnavailableError,
+        DisassemblyError,
+        DecompilerUnavailableError,
+        DecompilationError,
+    ) as exc:
         print(f"pspdisasm: {exc}", file=sys.stderr)
         return 2
     return 2

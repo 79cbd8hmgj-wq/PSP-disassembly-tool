@@ -69,3 +69,60 @@ def test_cli_project_generates_splat_workspace(tmp_path):
     assert code == 0
     assert (output / "splat.yaml").exists()
     assert (output / "config" / "symbols.txt").exists()
+
+
+def test_cli_decompile_generates_assisted_c(tmp_path, capsys):
+    import json as _json
+
+    project = tmp_path / "project"
+    (project / "metadata").mkdir(parents=True)
+    (project / "metadata" / "functions.json").write_text(
+        _json.dumps([
+            {
+                "name": "func_08800028",
+                "address": 0x08800028,
+                "size": 12,
+                "section": ".text",
+                "assembly": "glabel func_08800028\n    addiu $v0, $zero, 1\n    jr $ra\n     nop\nendlabel func_08800028\n",
+                "instruction_count": 3,
+                "instructions": [],
+            }
+        ]),
+        encoding="utf-8",
+    )
+    backend = tmp_path / "m2c.py"
+    backend.write_text("print('s32 func_08800028(void) { return 1; }')\n", encoding="utf-8")
+
+    code = main(["decompile", str(project), "func_08800028", "--m2c", str(backend)])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "func_08800028" in output
+    assert "src/nonmatching/func_08800028.c" in output
+    assert (project / "src" / "nonmatching" / "func_08800028.c").exists()
+
+
+def test_cli_decompile_reports_missing_backend(tmp_path, capsys):
+    import json as _json
+
+    project = tmp_path / "project"
+    (project / "metadata").mkdir(parents=True)
+    (project / "metadata" / "functions.json").write_text(
+        _json.dumps([
+            {
+                "name": "func_08800028",
+                "address": 0x08800028,
+                "size": 12,
+                "section": ".text",
+                "assembly": "glabel func_08800028\n    jr $ra\n     nop\nendlabel func_08800028\n",
+                "instruction_count": 2,
+                "instructions": [],
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    code = main(["decompile", str(project), "func_08800028", "--m2c", str(tmp_path / "missing.py")])
+
+    assert code == 2
+    assert "m2c" in capsys.readouterr().err.lower()
