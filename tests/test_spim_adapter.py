@@ -84,3 +84,38 @@ def test_seeded_nid_functions_must_point_into_executable_sections() -> None:
 
     assert 0x10 in seeded  # exported function in .text
     assert 0xD8 not in seeded  # imported stub lives in read-only .lib.stub
+
+
+def test_jump_table_decoder_accepts_only_consecutive_executable_targets() -> None:
+    import struct
+
+    data = bytearray(build_allegrex_elf32())
+    struct.pack_into("<III", data, 0x200, 0x08800000, 0x08800028, 0xDEADBEEF)
+    elf = parse_elf32(bytes(data))
+
+    targets = SpimdisasmAdapter._decode_jump_table_targets(elf, 0x08800100)
+
+    assert targets == [0x08800000, 0x08800028]
+
+
+def test_indirect_call_normalizer_uses_resolved_jalr_targets() -> None:
+    from types import SimpleNamespace
+
+    analyzer = SimpleNamespace(indirectFunctionCallIntrOffset={0x04: 0x08800028})
+    function = SimpleNamespace(
+        vram=0x08800000,
+        getNameUnquoted=lambda: "func_08800000",
+        instrAnalyzer=analyzer,
+    )
+    text = SimpleNamespace(symbolList=[function])
+    elf = parse_elf32(build_allegrex_elf32())
+
+    references = SpimdisasmAdapter._normalize_indirect_references(text, elf)
+
+    assert len(references) == 1
+    reference = references[0]
+    assert reference.source_address == 0x08800004
+    assert reference.target_address == 0x08800028
+    assert reference.kind == "indirect_call"
+    assert reference.source_function == "func_08800000"
+    assert reference.target_section == ".text"
