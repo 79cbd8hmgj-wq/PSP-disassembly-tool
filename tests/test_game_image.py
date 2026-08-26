@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+import zlib
 from pathlib import Path
 
 from pspdisasm.game_image import analyze_game_image
@@ -88,6 +89,36 @@ def _build_psp_iso() -> bytes:
     return b"".join(sectors)
 
 
+def _deflate_raw(block: bytes) -> bytes:
+    compressor = zlib.compressobj(level=9, wbits=-15)
+    return compressor.compress(block) + compressor.flush()
+
+
+def _build_cso_v1(iso: bytes) -> bytes:
+    assert len(iso) % SECTOR == 0
+    blocks = [iso[offset : offset + SECTOR] for offset in range(0, len(iso), SECTOR)]
+    header_size = 24
+    index_size = 4 * (len(blocks) + 1)
+    cursor = header_size + index_size
+    indices: list[int] = []
+    payloads: list[bytes] = []
+
+    for block in blocks:
+        compressed = _deflate_raw(block)
+        if len(compressed) >= len(block):
+            indices.append(cursor | 0x80000000)
+            payload = block
+        else:
+            indices.append(cursor)
+            payload = compressed
+        payloads.append(payload)
+        cursor += len(payload)
+    indices.append(cursor)
+
+    header = struct.pack("<4sIQIBB2s", b"CISO", header_size, len(iso), SECTOR, 1, 0, b"\x00\x00")
+    return header + b"".join(struct.pack("<I", value) for value in indices) + b"".join(payloads)
+
+
 def test_analyze_game_image_discovers_psp_boot_executable(tmp_path: Path) -> None:
     image = tmp_path / "game.iso"
     image.write_bytes(_build_psp_iso())
@@ -100,3 +131,15 @@ def test_analyze_game_image_discovers_psp_boot_executable(tmp_path: Path) -> Non
     assert [(entry.path, entry.kind) for entry in result.executables] == [
         ("/PSP_GAME/SYSDIR/EBOOT.BIN", "encrypted_psp_container")
     ]
+
+
+def test_analyze_game_image_reads_standard_cso_v1_blocks(tmp_path: Path) -> None:
+    iso = _build_psp_iso()
+    image = tmp_path / "game.cso"
+    image.write_bytes(_build_cso_v1(iso))
+
+    result = analyze_game_image(image)
+
+    assert result.image_format == "cso"
+    assert result.logical_size == len(iso)
+    assert result.boot_path == "/PSP_GAME/SYSDIR/EBOOT.BIN"
