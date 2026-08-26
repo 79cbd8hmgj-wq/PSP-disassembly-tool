@@ -250,11 +250,20 @@ def test_table_scan_stops_at_section_boundary():
 def test_struct_candidate_requires_two_typed_fields_and_array_candidate_outranks_struct():
     words = {
         BASE_DATA: BASE_DATA + 0x80,
-        BASE_DATA + 4: BASE_TEXT,
-        BASE_DATA + 8: BASE_DATA + 0x84,
-        BASE_DATA + 12: BASE_TEXT + 0x10,
+        BASE_DATA + 4: 1,
+        BASE_DATA + 8: BASE_TEXT,
+        BASE_DATA + 12: 2,
+        BASE_DATA + 16: BASE_DATA + 0x84,
+        BASE_DATA + 20: 3,
+        BASE_DATA + 24: BASE_TEXT + 0x10,
+        BASE_DATA + 28: 4,
     }
-    relocs = [_reloc(BASE_DATA), _reloc(BASE_DATA + 4), _reloc(BASE_DATA + 8), _reloc(BASE_DATA + 12)]
+    relocs = [
+        _reloc(BASE_DATA),
+        _reloc(BASE_DATA + 8),
+        _reloc(BASE_DATA + 16),
+        _reloc(BASE_DATA + 24),
+    ]
     references = [ReferenceRecord(BASE_TEXT, BASE_DATA, "data", "func_00001000", ".data")]
     model, disassembly, elf = _fixture(words, relocations=relocs, references=references)
 
@@ -262,8 +271,8 @@ def test_struct_candidate_requires_two_typed_fields_and_array_candidate_outranks
 
     composite = _type(result, BASE_DATA)
     assert composite is not None and composite.type_name == "array_candidate"
-    assert composite.element_type == "struct_candidate" and composite.element_size == 8 and composite.count == 2
-    assert [(field.offset, field.type_name) for field in composite.fields] == [(0, "pointer"), (4, "function_pointer")]
+    assert composite.element_type == "struct_candidate" and composite.element_size == 16 and composite.count == 2
+    assert [(field.offset, field.type_name) for field in composite.fields] == [(0, "pointer"), (8, "function_pointer")]
 
 
 def test_single_typed_field_does_not_create_struct_candidate():
