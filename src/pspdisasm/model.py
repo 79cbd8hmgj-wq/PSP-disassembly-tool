@@ -322,6 +322,61 @@ class AdvancedAnalysisResult:
 
 
 @dataclass(slots=True)
+class TypedFieldRecord:
+    offset: int
+    type_name: str
+    target_address: int | None
+    confidence: float
+    evidence: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DataTypeRecord:
+    address: int
+    section: str
+    type_name: str
+    size: int
+    target_address: int | None = None
+    count: int | None = None
+    element_type: str | None = None
+    element_size: int | None = None
+    confidence: float = 0.0
+    evidence: list[str] = field(default_factory=list)
+    fields: list[TypedFieldRecord] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TypedReferenceRecord:
+    source_address: int
+    target_address: int
+    kind: str
+    source_function: str | None
+    target_section: str | None
+    target_type: str
+    confidence: float
+    evidence: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TypedCallEdge:
+    source_function: str
+    target_function: str
+    source_address: int
+    target_address: int
+    kind: str
+    evidence: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DataTypingResult:
+    source_name: str
+    data_types: list[DataTypeRecord] = field(default_factory=list)
+    typed_references: list[TypedReferenceRecord] = field(default_factory=list)
+    call_edges: list[TypedCallEdge] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class AssemblySection:
     name: str
     address: int
