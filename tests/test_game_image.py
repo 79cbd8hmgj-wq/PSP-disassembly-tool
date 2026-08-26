@@ -4,10 +4,16 @@ import struct
 import zlib
 from pathlib import Path
 
-from pspdisasm.game_image import analyze_game_image, parse_param_sfo
+from pspdisasm.game_image import (
+    analyze_game_image,
+    extract_game_executables,
+    parse_param_sfo,
+    read_game_file,
+)
 
 
 SECTOR = 2048
+EBOOT_BYTES = b"~PSP" + b"\x00" * 60
 
 
 def _both16(value: int) -> bytes:
@@ -49,7 +55,6 @@ def _build_psp_iso(param_sfo: bytes | None = None) -> bytes:
     sysdir_extent = 22
     eboot_extent = 23
     sfo_extent = 24
-    eboot = b"~PSP" + b"\x00" * 60
 
     pvd = sectors[16]
     pvd[0] = 1
@@ -85,10 +90,10 @@ def _build_psp_iso(param_sfo: bytes | None = None) -> bytes:
         [
             _record(sysdir_extent, SECTOR, b"\x00", directory=True),
             _record(game_extent, SECTOR, b"\x01", directory=True),
-            _record(eboot_extent, len(eboot), b"EBOOT.BIN;1", directory=False),
+            _record(eboot_extent, len(EBOOT_BYTES), b"EBOOT.BIN;1", directory=False),
         ]
     )
-    sectors[eboot_extent][: len(eboot)] = eboot
+    sectors[eboot_extent][: len(EBOOT_BYTES)] = EBOOT_BYTES
     return b"".join(sectors)
 
 
@@ -201,3 +206,17 @@ def test_analyze_game_image_reads_param_sfo_metadata(tmp_path: Path) -> None:
     assert result.param_sfo["DISC_ID"] == "ULUS12345"
     assert result.param_sfo["TITLE"] == "Fixture Game"
     assert result.param_sfo["MEMSIZE"] == 1
+
+
+def test_read_and_extract_executable_from_cso_without_full_unpack(tmp_path: Path) -> None:
+    image = tmp_path / "game.cso"
+    image.write_bytes(_build_cso_v1(_build_psp_iso()))
+
+    assert read_game_file(image, "/PSP_GAME/SYSDIR/EBOOT.BIN") == EBOOT_BYTES
+
+    output = tmp_path / "extracted"
+    extracted = extract_game_executables(image, output)
+
+    expected = output / "PSP_GAME" / "SYSDIR" / "EBOOT.BIN"
+    assert extracted == [expected]
+    assert expected.read_bytes() == EBOOT_BYTES
