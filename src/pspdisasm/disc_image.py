@@ -202,7 +202,12 @@ class CsoReader(io.RawIOBase):
             else:
                 stored = self._fp.read(stored_size)
                 if current & _INDEX_FLAG:
-                    block = self._decompress_lz4(stored, expected_size, block_index)
+                    block = self._decompress_lz4(
+                        stored,
+                        expected_size,
+                        block_index,
+                        self.header.index_shift,
+                    )
                 else:
                     block = self._inflate(stored, block_index)
 
@@ -225,17 +230,34 @@ class CsoReader(io.RawIOBase):
             raise ParseError(f"CISO DEFLATE block {block_index} is invalid: {exc}") from exc
 
     @staticmethod
-    def _decompress_lz4(data: bytes, expected_size: int, block_index: int) -> bytes:
+    def _decompress_lz4(
+        data: bytes,
+        expected_size: int,
+        block_index: int,
+        index_shift: int,
+    ) -> bytes:
         try:
             import lz4.block
         except ImportError as exc:
             raise EngineUnavailableError(
                 "CISO v2 uses LZ4 compression; install pspdisasm with the 'disc' extra"
             ) from exc
-        try:
-            return lz4.block.decompress(data, uncompressed_size=expected_size)
-        except Exception as exc:
-            raise ParseError(f"CISO LZ4 block {block_index} is invalid: {exc}") from exc
+
+        max_padding = min((1 << index_shift) - 1 if index_shift else 0, max(0, len(data) - 1))
+        first_error: Exception | None = None
+        for padding in range(max_padding + 1):
+            candidate = data if padding == 0 else data[:-padding]
+            try:
+                block = lz4.block.decompress(candidate, uncompressed_size=expected_size)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            if len(block) == expected_size:
+                return block
+
+        detail = f": {first_error}" if first_error is not None else ""
+        raise ParseError(f"CISO LZ4 block {block_index} is invalid{detail}")
 
     def close(self) -> None:
         if not self.closed:
