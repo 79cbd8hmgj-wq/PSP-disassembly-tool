@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -9,11 +9,12 @@ from typing import Any
 
 import yaml
 
+from .advanced import analyze_advanced
 from .analyzer import analyze_bytes, model_to_dict
 from .disassembler import disassemble_bytes, result_to_dict
 from .elf32 import parse_elf32
 from .errors import DisassemblyError
-from .model import DisassemblyResult, ElfImage, Section
+from .model import AdvancedAnalysisResult, DisassemblyResult, ElfImage, Section
 
 SHF_ALLOC = 0x2
 SHT_NOBITS = 8
@@ -28,7 +29,9 @@ class ProjectArtifacts:
     symbols: str
     executable_json: str
     disassembly_json: str
+    advanced_json: str
     disassembly: DisassemblyResult
+    advanced: AdvancedAnalysisResult
 
 
 @dataclass(slots=True)
@@ -227,6 +230,7 @@ def build_project_artifacts(data: bytes, source_name: str = "<memory>") -> Proje
         raise DisassemblyError("Splat project generation requires a decrypted PSP ELF/PRX input.")
     elf = parse_elf32(data)
     result = disassemble_bytes(data, source_name)
+    advanced = analyze_advanced(model, result)
     base_vram, target, sections = _flatten_elf(elf)
     gp = model.module_info.gp_value if model.module_info is not None else None
     splat_yaml = _render_splat_yaml(source_name, target, base_vram, sections, gp)
@@ -238,7 +242,9 @@ def build_project_artifacts(data: bytes, source_name: str = "<memory>") -> Proje
         symbols=symbols,
         executable_json=json.dumps(model_to_dict(model), indent=2, sort_keys=True) + "\n",
         disassembly_json=json.dumps(result_to_dict(result), indent=2, sort_keys=True) + "\n",
+        advanced_json=json.dumps(asdict(advanced), indent=2, sort_keys=True) + "\n",
         disassembly=result,
+        advanced=advanced,
     )
 
 
@@ -251,6 +257,10 @@ def _assembly_filename(name: str, address: int, used: set[str]) -> str:
         filename = f"{base}_{address:08X}.s"
     used.add(filename)
     return filename
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def generate_project(source: Path | str, output_dir: Path | str) -> ProjectResult:
@@ -268,10 +278,16 @@ def generate_project(source: Path | str, output_dir: Path | str) -> ProjectResul
     (output / "config" / "undefined_syms_auto.txt").write_text("", encoding="utf-8")
     (output / "metadata" / "executable.json").write_text(artifacts.executable_json, encoding="utf-8")
     (output / "metadata" / "disassembly.json").write_text(artifacts.disassembly_json, encoding="utf-8")
+    (output / "metadata" / "advanced.json").write_text(artifacts.advanced_json, encoding="utf-8")
+
     normalized = result_to_dict(artifacts.disassembly)
     for key in ("functions", "symbols", "references", "strings"):
-        payload = json.dumps(normalized[key], indent=2, sort_keys=True) + "\n"
-        (output / "metadata" / f"{key}.json").write_text(payload, encoding="utf-8")
+        _write_json(output / "metadata" / f"{key}.json", normalized[key])
+
+    advanced = asdict(artifacts.advanced)
+    _write_json(output / "metadata" / "callgraph.json", advanced["call_edges"])
+    _write_json(output / "metadata" / "jump_tables.json", advanced["jump_tables"])
+    _write_json(output / "metadata" / "function_confidence.json", advanced["function_confidence"])
 
     used: set[str] = set()
     for section in artifacts.disassembly.assembly_sections:
