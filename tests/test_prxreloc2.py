@@ -79,3 +79,34 @@ def test_decode_prxreloc2_minimal_r_mips_32_stream():
     assert reloc.stream_offset == 11
     assert reloc.encoding_flags == 1
     assert reloc.info == (2 | (0 << 8) | (1 << 16))
+
+
+def test_decode_prxreloc2_extended_positive_delta():
+    stream = bytes.fromhex(
+        "00 00 02 01"
+        "03 00 03"     # relocation flag 0x03 => extended signed delta
+        "02 02"
+        "01 00"        # base = 0
+        "0E 00 04 00"  # high delta = 0, low u16 = 4
+    )
+    data, elf = _reloc2_elf(stream)
+
+    relocations = decode_prxreloc2(data, elf, 2)
+
+    assert [reloc.offset for reloc in relocations] == [4]
+    assert relocations[0].encoding_flags == 0x03
+
+
+def test_decode_prxreloc2_extended_negative_delta():
+    stream = bytes.fromhex(
+        "00 00 02 01"
+        "03 00 03"
+        "02 02"
+        "41 00"        # compact state command: base = 8
+        "FE FF FC FF"  # signed high half -1 + low half 0xFFFC => delta -4
+    )
+    data, elf = _reloc2_elf(stream)
+
+    relocations = decode_prxreloc2(data, elf, 2)
+
+    assert [reloc.offset for reloc in relocations] == [4]
