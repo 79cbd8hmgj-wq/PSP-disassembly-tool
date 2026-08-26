@@ -6,7 +6,11 @@ import struct
 
 import pycdlib
 
+import pspdisasm.game_project as game_project
+from pspdisasm.errors import DisassemblyError
 from pspdisasm.game_project import generate_game_project
+from pspdisasm.linker import ModuleAnalysisInput
+from pspdisasm.model import ModuleLinkAnalysis
 from tests.fixtures import build_allegrex_elf32, build_psp_container_header
 
 
@@ -110,3 +114,68 @@ def test_generate_game_project_analyzes_decrypted_boot_and_records_encrypted_mod
     assert locked["project_path"] is None
     assert locked["module_name"] == "GAMEBOOT"
     assert any("decryption" in warning.lower() for warning in locked["warnings"])
+
+
+def test_generate_game_project_links_all_successfully_analyzed_modules(tmp_path, monkeypatch):
+    image = tmp_path / "linked.iso"
+    output = tmp_path / "linked_decomp"
+    _build_game_iso(
+        image,
+        eboot=build_allegrex_elf32(),
+        modules={
+            "PSP_GAME/USRDIR/SECOND.PRX": build_allegrex_elf32(),
+        },
+    )
+
+    captured: list[list[ModuleAnalysisInput]] = []
+
+    def record_links(units, database=None):
+        materialized = list(units)
+        captured.append(materialized)
+        return ModuleLinkAnalysis(modules=[unit.model.source_name for unit in materialized])
+
+    monkeypatch.setattr(game_project, "link_modules", record_links)
+
+    result = generate_game_project(image, output)
+
+    assert result.analyzed_count == 2
+    assert len(captured) == 1
+    assert len(captured[0]) == 2
+    assert all(isinstance(unit, ModuleAnalysisInput) for unit in captured[0])
+    sources = [unit.model.source_name for unit in captured[0]]
+    assert sources[0].endswith("modules/PSP_GAME/SYSDIR/EBOOT.BIN")
+    assert sources[1].endswith("modules/PSP_GAME/USRDIR/SECOND.PRX")
+
+
+def test_generate_game_project_isolates_secondary_disassembly_failure(tmp_path, monkeypatch):
+    image = tmp_path / "failure.iso"
+    output = tmp_path / "failure_decomp"
+    _build_game_iso(
+        image,
+        eboot=build_allegrex_elf32(),
+        modules={
+            "PSP_GAME/USRDIR/BROKEN.PRX": build_allegrex_elf32(),
+        },
+    )
+
+    original_disassemble = game_project.disassemble_file
+
+    def fail_secondary(path):
+        if str(path).endswith("BROKEN.PRX"):
+            raise DisassemblyError("synthetic failure")
+        return original_disassemble(path)
+
+    monkeypatch.setattr(game_project, "disassemble_file", fail_secondary)
+
+    result = generate_game_project(image, output)
+
+    assert result.analyzed_count == 1
+    assert result.failed_count == 1
+    assert (output / "projects/PSP_GAME/SYSDIR/EBOOT.BIN/splat.yaml").exists()
+
+    analysis = json.loads((output / "metadata/game_analysis.json").read_text(encoding="utf-8"))
+    modules = {record["path"]: record for record in analysis["modules"]}
+    broken = modules["PSP_GAME/USRDIR/BROKEN.PRX"]
+    assert broken["status"] == "failed"
+    assert broken["project_path"] is None
+    assert any("synthetic failure" in warning for warning in broken["warnings"])
