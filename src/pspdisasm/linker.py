@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -28,6 +29,33 @@ def _module_name(model: ExecutableModel) -> str:
         return model.module_info.name.strip()
     stem = Path(model.source_name).stem
     return stem or model.source_name
+
+
+def _module_labels(units: list[ModuleAnalysisInput]) -> tuple[list[str], list[str]]:
+    raw_names = [_module_name(unit.model) for unit in units]
+    counts = Counter(raw_names)
+    candidate_counts: dict[str, int] = defaultdict(int)
+    duplicate_labels: dict[str, list[str]] = defaultdict(list)
+    labels: list[str] = []
+
+    for unit, raw_name in zip(units, raw_names):
+        if counts[raw_name] == 1:
+            labels.append(raw_name)
+            continue
+
+        source_name = Path(unit.model.source_name).name or "module"
+        base_label = f"{raw_name}@{source_name}"
+        candidate_counts[base_label] += 1
+        ordinal = candidate_counts[base_label]
+        label = base_label if ordinal == 1 else f"{base_label}#{ordinal}"
+        labels.append(label)
+        duplicate_labels[raw_name].append(label)
+
+    warnings = [
+        f"Duplicate module name {raw_name!r} disambiguated by source file: {', '.join(names)}"
+        for raw_name, names in sorted(duplicate_labels.items())
+    ]
+    return labels, warnings
 
 
 def _iter_entries(model: ExecutableModel, direction: str):
@@ -154,48 +182,55 @@ def link_modules(
 ) -> ModuleLinkAnalysis:
     units = list(modules)
     database = database or NidDatabase()
-    module_names = [_module_name(unit.model) for unit in units]
-    warnings = list(database.warnings)
+    module_labels, identity_warnings = _module_labels(units)
+    warnings = [*database.warnings, *identity_warnings]
 
     resolutions: list[NidResolution] = []
-    resolution_by_identity: dict[tuple[str, str, str, int, int], NidResolution] = {}
+    resolution_by_identity: dict[tuple[int, str, str, int, int], NidResolution] = {}
     proposals: list[PropagatedSymbol] = []
 
-    exporters: dict[tuple[str, str, int], list[tuple[ModuleAnalysisInput, str, NidEntry]]] = {}
-    for unit, module_name in zip(units, module_names):
+    exporters: dict[
+        tuple[str, str, int],
+        list[tuple[int, ModuleAnalysisInput, str, NidEntry]],
+    ] = {}
+    for unit_index, (unit, module_label) in enumerate(zip(units, module_labels)):
         for direction in ("import", "export"):
             for library, kind, entry in _iter_entries(unit.model, direction):
-                resolution = _resolution(module_name, library, kind, entry, direction, database)
+                resolution = _resolution(module_label, library, kind, entry, direction, database)
                 resolutions.append(resolution)
-                resolution_by_identity[(module_name, direction, library, entry.nid, entry.address)] = resolution
+                resolution_by_identity[
+                    (unit_index, direction, library, entry.nid, entry.address)
+                ] = resolution
                 proposals.append(_proposal_from_resolution(resolution))
                 if direction == "export":
-                    exporters.setdefault((library, kind, entry.nid), []).append((unit, module_name, entry))
+                    exporters.setdefault((library, kind, entry.nid), []).append(
+                        (unit_index, unit, module_label, entry)
+                    )
 
     links: list[ModuleLink] = []
-    for unit, importing_module in zip(units, module_names):
+    for importing_index, (unit, importing_module) in enumerate(zip(units, module_labels)):
         for library, kind, entry in _iter_entries(unit.model, "import"):
             candidates = [
                 candidate
                 for candidate in exporters.get((library, kind, entry.nid), [])
-                if candidate[1] != importing_module
+                if candidate[0] != importing_index
             ]
             if not candidates:
                 continue
             if len(candidates) > 1:
-                providers = sorted(candidate[1] for candidate in candidates)
+                providers = sorted(candidate[2] for candidate in candidates)
                 warnings.append(
                     f"Ambiguous export for {importing_module} import "
                     f"{library}/{kind}/0x{entry.nid:08X}: {', '.join(providers)}"
                 )
                 continue
 
-            exporter_unit, exporting_module, export_entry = candidates[0]
+            exporter_index, exporter_unit, exporting_module, export_entry = candidates[0]
             import_resolution = resolution_by_identity[
-                (importing_module, "import", library, entry.nid, entry.address)
+                (importing_index, "import", library, entry.nid, entry.address)
             ]
             export_resolution = resolution_by_identity[
-                (exporting_module, "export", library, export_entry.nid, export_entry.address)
+                (exporter_index, "export", library, export_entry.nid, export_entry.address)
             ]
 
             name = _fallback_name(library, entry.nid)
@@ -241,7 +276,7 @@ def link_modules(
                 )
 
     return ModuleLinkAnalysis(
-        modules=module_names,
+        modules=module_labels,
         resolutions=sorted(
             resolutions,
             key=lambda item: (
