@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 
 from pspdisasm.project import build_project_artifacts, generate_project
-from tests.fixtures import build_allegrex_elf32, build_psp_container_header
+from tests.fixtures import build_allegrex_elf32, build_prx_elf32, build_psp_container_header
 
 
 def test_project_artifacts_flatten_alloc_sections_and_render_psp_splat():
@@ -87,6 +87,53 @@ def test_generate_project_materializes_workspace(tmp_path: Path):
     assert advanced["call_edges"] == callgraph
     assert advanced["function_confidence"] == confidence
     assert advanced["jump_tables"] == jump_tables
+
+
+def test_project_applies_optional_nid_database_and_writes_resolution_metadata(tmp_path: Path):
+    source = tmp_path / "sample.prx"
+    output = tmp_path / "named_decomp"
+    database = tmp_path / "nids.json"
+    source.write_bytes(build_prx_elf32())
+    database.write_text(
+        json.dumps(
+            [
+                {"library": "TestEx", "kind": "function", "nid": "11111111", "name": "TestExportFunction", "source": "test-db"},
+                {"library": "TestEx", "kind": "variable", "nid": "22222222", "name": "TestExportVariable", "source": "test-db"},
+                {"library": "TestIm", "kind": "function", "nid": "AAAA0001", "name": "TestImportOne", "source": "test-db"},
+                {"library": "TestIm", "kind": "function", "nid": "AAAA0002", "name": "TestImportTwo", "source": "test-db"},
+                {"library": "TestIm", "kind": "variable", "nid": "BBBB0001", "name": "TestImportVariable", "source": "test-db"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    generate_project(source, output, nid_databases=[database])
+
+    nids_path = output / "metadata" / "nids.json"
+    propagated_path = output / "metadata" / "propagated_symbols.json"
+    assert nids_path.exists()
+    assert propagated_path.exists()
+
+    resolutions = json.loads(nids_path.read_text(encoding="utf-8"))
+    assert len(resolutions) == 5
+    assert {(item["direction"], item["name"]) for item in resolutions} == {
+        ("export", "TestExportFunction"),
+        ("export", "TestExportVariable"),
+        ("import", "TestImportOne"),
+        ("import", "TestImportTwo"),
+        ("import", "TestImportVariable"),
+    }
+
+    propagated = json.loads(propagated_path.read_text(encoding="utf-8"))
+    assert len(propagated) == 5
+    assert all(item["confidence"] == 1.0 for item in propagated)
+
+    symbols = (output / "config" / "symbols.txt").read_text(encoding="utf-8")
+    assert "TestExportFunction = 0x00000010; // type:func" in symbols
+    assert "TestExportVariable = 0x00000014;" in symbols
+    assert "TestImportOne = 0x000000D8; // type:func" in symbols
+    assert "TestImportTwo = 0x000000E0; // type:func" in symbols
+    assert "TestImportVariable = 0x00000050;" in symbols
 
 
 def test_project_rejects_encrypted_psp_container():
