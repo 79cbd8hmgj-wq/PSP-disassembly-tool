@@ -23,6 +23,8 @@ def test_cli_game_project_analyzes_disc_and_reports_counts(tmp_path, capsys):
     assert (output / "metadata" / "game_analysis.json").exists()
     assert (output / "metadata" / "module_links.json").exists()
     assert (output / "metadata" / "game_resources.json").exists()
+    assert (output / "metadata" / "container_candidates.json").exists()
+    assert (output / "metadata" / "container_inspections.json").exists()
 
     stdout = capsys.readouterr().out
     assert "Game: Synthetic PSP Game" in stdout
@@ -36,5 +38,9 @@ def test_cli_game_project_analyzes_disc_and_reports_counts(tmp_path, capsys):
     assert "Known resources: 1" in stdout
     assert "Unknown resources: 1" in stdout
     assert "Embedded resources: 0" in stdout
+    assert "Container candidates: 1" in stdout
+    assert "Inspected containers: 0" in stdout
+    assert "Container entries: 0" in stdout
     assert "Game analysis:" in stdout
     assert "Resource analysis:" in stdout
+    assert "Container analysis:" in stdout
