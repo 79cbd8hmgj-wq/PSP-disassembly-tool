@@ -196,6 +196,8 @@ def decode_prxreloc2(
         elif offset_mode == 0x02:
             low_half = reader.read_u16("extended relocation delta")
             relocation_base += _signed_extended_delta(command, payload_shift, low_half)
+        elif offset_mode == 0x04:
+            relocation_base = reader.read_u32("absolute relocation offset")
         else:
             raise ParseError(
                 f"unsupported PT_PRXRELOC2 relocation offset mode 0x{offset_mode:02X}"
