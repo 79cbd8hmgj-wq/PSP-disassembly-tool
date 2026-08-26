@@ -4,7 +4,7 @@ import struct
 import zlib
 from pathlib import Path
 
-from pspdisasm.game_image import analyze_game_image
+from pspdisasm.game_image import analyze_game_image, parse_param_sfo
 
 
 SECTOR = 2048
@@ -119,6 +119,40 @@ def _build_cso_v1(iso: bytes) -> bytes:
     return header + b"".join(struct.pack("<I", value) for value in indices) + b"".join(payloads)
 
 
+def _build_param_sfo() -> bytes:
+    entries = [
+        ("DISC_ID", 0x0204, b"ULUS12345\x00"),
+        ("TITLE", 0x0204, b"Fixture Game\x00"),
+        ("MEMSIZE", 0x0404, struct.pack("<I", 1)),
+    ]
+    keys = bytearray()
+    data = bytearray()
+    index = bytearray()
+    key_offsets: list[int] = []
+    data_offsets: list[int] = []
+
+    for key, _fmt, value in entries:
+        key_offsets.append(len(keys))
+        keys.extend(key.encode("ascii") + b"\x00")
+        while len(data) % 4:
+            data.append(0)
+        data_offsets.append(len(data))
+        data.extend(value)
+
+    key_start = 20 + 16 * len(entries)
+    data_start = key_start + len(keys)
+    while data_start % 4:
+        keys.append(0)
+        data_start += 1
+
+    for (key, fmt, value), key_offset, data_offset in zip(entries, key_offsets, data_offsets, strict=True):
+        max_len = 4 if fmt == 0x0404 else len(value)
+        index.extend(struct.pack("<HHIII", key_offset, fmt, len(value), max_len, data_offset))
+
+    header = struct.pack("<4sIIII", b"\x00PSF", 0x00000101, key_start, data_start, len(entries))
+    return header + bytes(index) + bytes(keys) + bytes(data)
+
+
 def test_analyze_game_image_discovers_psp_boot_executable(tmp_path: Path) -> None:
     image = tmp_path / "game.iso"
     image.write_bytes(_build_psp_iso())
@@ -143,3 +177,13 @@ def test_analyze_game_image_reads_standard_cso_v1_blocks(tmp_path: Path) -> None
     assert result.image_format == "cso"
     assert result.logical_size == len(iso)
     assert result.boot_path == "/PSP_GAME/SYSDIR/EBOOT.BIN"
+
+
+def test_parse_param_sfo_decodes_strings_and_integer_values() -> None:
+    metadata = parse_param_sfo(_build_param_sfo())
+
+    assert metadata == {
+        "DISC_ID": "ULUS12345",
+        "MEMSIZE": 1,
+        "TITLE": "Fixture Game",
+    }
