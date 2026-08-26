@@ -118,6 +118,58 @@ def _signed_u16(value: int) -> int:
     return value - 0x10000 if value & 0x8000 else value
 
 
+def apply_psp_relocation_word(
+    word: int,
+    relocation: Relocation,
+    target_base: int,
+    *,
+    lo16: int | None = None,
+) -> int:
+    """Apply one normalized PSP relocation to a 32-bit word.
+
+    The caller supplies the target load base explicitly.  This helper never
+    chooses a PSP runtime address and never mutates ELF data on its own.
+    """
+    word &= 0xFFFFFFFF
+    target_base &= 0xFFFFFFFF
+    relocation_type = relocation.type
+
+    if relocation_type == 0:
+        return word
+
+    if relocation_type == 2:
+        return (word + target_base) & 0xFFFFFFFF
+
+    if relocation_type in {1, 6}:
+        low_half = ((word & 0xFFFF) + target_base) & 0xFFFF
+        return (word & 0xFFFF0000) | low_half
+
+    if relocation_type in {4, 14, 15}:
+        jump_field = ((word & 0x03FFFFFF) + (target_base >> 2)) & 0x03FFFFFF
+        if relocation_type == 14:
+            return 0x08000000 | jump_field
+        if relocation_type == 15:
+            return 0x0C000000 | jump_field
+        return (word & 0xFC000000) | jump_field
+
+    if relocation_type == 5:
+        resolved_low_half = lo16 if lo16 is not None else relocation.addend
+        if resolved_low_half is None:
+            raise ParseError(
+                "R_MIPS_HI16 relocation has unresolved low-half state; provide lo16 explicitly"
+            )
+        address = (
+            ((word & 0xFFFF) << 16)
+            + int(resolved_low_half)
+            + target_base
+        ) & 0xFFFFFFFF
+        if address & 0x8000:
+            address = (address + 0x10000) & 0xFFFFFFFF
+        return (word & 0xFFFF0000) | ((address >> 16) & 0xFFFF)
+
+    raise ParseError(f"unsupported PSP relocation type {relocation_type}")
+
+
 def decode_prxreloc2(
     data: bytes,
     elf: ElfImage,
