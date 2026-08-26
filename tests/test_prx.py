@@ -34,14 +34,40 @@ def test_parses_prx_module_info_imports_exports_and_relocations():
     assert [entry.nid for entry in imp.variables] == [0xBBBB0001]
     assert [entry.address for entry in imp.variables] == [0x50]
 
+    assert len(result.relocations) == 2
+    type_a = result.relocations[0]
+    assert type_a.offset == 0x04
+    assert type_a.type == 2
+    assert type_a.type_name == "R_MIPS_32"
+    assert type_a.symbol_index == 1
+    assert type_a.target_section_index == 1
+
+    type_b = result.relocations[1]
+    assert type_b.source == "program_header_rel2"
+    assert type_b.section == "PT_PRXRELOC2[1]"
+    assert type_b.offset == 0
+    assert type_b.type == 1
+    assert type_b.type_name == "R_MIPS_16"
+    assert type_b.source_segment_index == 0
+    assert type_b.target_segment_index == 0
+    assert not any("decoding is not implemented" in warning for warning in result.warnings)
+
+
+def test_malformed_prxreloc2_isolated_as_warning_and_type_a_survives():
+    blob = bytearray(build_prx_elf32())
+    blob[0x308:0x310] = bytes.fromhex("00 00 0F 02 01 01 00 00")
+    data = bytes(blob)
+    elf = parse_elf32(data)
+
+    result = analyze_prx(data, elf)
+
     assert len(result.relocations) == 1
-    reloc = result.relocations[0]
-    assert reloc.offset == 0x04
-    assert reloc.type == 2
-    assert reloc.type_name == "R_MIPS_32"
-    assert reloc.symbol_index == 1
-    assert reloc.target_section_index == 1
-    assert any("PT_PRXRELOC2" in warning for warning in result.warnings)
+    assert result.relocations[0].source == "section"
+    assert result.relocations[0].type == 2
+    assert any(
+        "PT_PRXRELOC2 program header 1" in warning and "bit widths exceed 16 bits" in warning
+        for warning in result.warnings
+    )
 
 
 def test_finds_module_info_from_first_load_header_when_section_name_is_absent():

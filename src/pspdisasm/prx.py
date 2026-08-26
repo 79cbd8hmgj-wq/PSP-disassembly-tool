@@ -12,6 +12,7 @@ from .model import (
     PrxAnalysis,
     Relocation,
 )
+from .prxreloc2 import decode_prxreloc2
 
 ET_SCE_PSPRELEXEC = 0xFFA0
 SHT_REL = 9
@@ -273,7 +274,10 @@ def _parse_relocations(data: bytes, elf: ElfImage, warnings: list[str]) -> list[
                     )
                 )
         elif ph.type == PT_PRXRELOC2:
-            warnings.append("PT_PRXRELOC2 compressed relocation segment detected; decoding is not implemented in Phase 1")
+            try:
+                relocs.extend(decode_prxreloc2(data, elf, ph.index))
+            except ParseError as exc:
+                warnings.append(f"PT_PRXRELOC2 program header {ph.index}: {exc}")
     return relocs
 
 
