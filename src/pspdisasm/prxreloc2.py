@@ -226,6 +226,8 @@ def decode_prxreloc2(
             addend: int | None = 0
         elif lo16_mode == 0x10:
             addend = _signed_u16(reader.read_u16("HI16 low-half addend"))
+        elif lo16_mode == 0x08:
+            addend = None
         else:
             raise ParseError(
                 f"unsupported PT_PRXRELOC2 lo16 mode 0x{lo16_mode:02X}"
