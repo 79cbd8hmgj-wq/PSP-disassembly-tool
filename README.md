@@ -2,9 +2,9 @@
 
 `pspdisasm` is a PSP-focused executable-analysis, disassembly, decompilation, and matching toolkit. It adds PSP-specific container/PRX intelligence around the Decompollaborate ecosystem instead of merging the upstream projects into one fork.
 
-## Current status: Phase 6C
+## Current status: Phase 6D
 
-The toolkit currently covers the original five workflow layers plus three advanced-analysis layers.
+The toolkit currently covers the original five workflow layers plus four advanced-analysis layers.
 
 ### Phase 1 — PSP executable intelligence
 
@@ -80,7 +80,21 @@ The toolkit currently covers the original five workflow layers plus three advanc
 - Add `typed_indirect` call edges only when an existing indirect-call reference targets a slot accepted as a function pointer to a known function.
 - Feed only confidence-`0.90` or stronger pointer/table object names into generated symbols, while preserving entrypoint, string, curated, function, and stronger NID names.
 
-Future advanced slices can build on these normalized relationships for deeper relocation support, richer structure/header recovery, and asset discovery without weakening Phase 6C's conservative inference boundary.
+### Phase 6D — conservative asset and resource discovery
+
+- Scan only allocated, file-backed, non-executable ELF storage; executable sections and `SHT_NOBITS` are never treated as asset byte streams.
+- Detect embedded PNG and JPEG images with validated bounded endings.
+- Detect bounded RIFF/WAVE audio and specialize validated ATRAC-family RIFF containers as AT3 resources.
+- Detect VAG audio using internally plausible big-endian header fields and bounded payload sizes.
+- Recognize PSP GIM and PSMF/PMF resources conservatively even when a trustworthy full extent cannot yet be derived.
+- Scan at byte granularity so resources need not be word aligned.
+- Suppress overlapping weaker candidates when a validated extractable asset owns the byte range.
+- Link discovered asset starts back to existing normalized direct references, Phase 6C typed references, and typed data targets by exact address only.
+- Cap link confidence by the evidence that already exists instead of adding new pointer heuristics.
+- Extract bytes only when the detector has a known positive size and a fully validated source-file extent.
+- Emit deterministic JSON metadata plus an analyst-friendly CSV inventory.
+
+Phase 6D intentionally stops at executable/module-scoped resource intelligence. ISO/CSO filesystem orchestration, recursive game-wide asset discovery, format conversion, and game-specific resource-manager reconstruction belong to later phases.
 
 ## Installation
 
@@ -158,17 +172,21 @@ game_decomp/
 │   ├── data_types.json
 │   ├── typed_references.json
 │   ├── typed_callgraph.json
+│   ├── asset_discovery.json
+│   ├── assets.json
+│   ├── asset_references.json
 │   ├── nids.json                  # when --nid-db is supplied
 │   └── propagated_symbols.json    # when --nid-db is supplied
 ├── asm/
 │   └── nonmatchings/
 ├── src/
 ├── build/
-├── assets/
+├── assets/                        # only safely bounded resources are carved
 └── reports/
+    └── assets.csv
 ```
 
-Phase 6A and Phase 6C run automatically during project generation. Phase 6B NID resolution runs when at least one `--nid-db` is supplied.
+Phase 6A, Phase 6C, and Phase 6D run automatically during project generation. Phase 6B NID resolution runs when at least one `--nid-db` is supplied.
 
 ### Link PSP modules
 
@@ -341,6 +359,26 @@ Project generation emits:
 
 Phase 6C is deliberately conservative. A value being aligned and inside a mapped section is not enough to call it a pointer, exact C struct recovery is not claimed, scalar-only arrays are not inferred, and compressed `PT_PRXRELOC2` streams are not decoded or applied.
 
+## Phase 6D Python API and artifacts
+
+The package exposes:
+
+```python
+from pspdisasm import analyze_assets
+```
+
+`analyze_assets(model, disassembly, data_typing, elf)` returns an `AssetDiscoveryResult` without mutating any lower-level model. It consumes Phase 2 references and Phase 6C typed relationships only as existing evidence.
+
+Project generation emits:
+
+- `metadata/asset_discovery.json` — complete Phase 6D result including warnings;
+- `metadata/assets.json` — normalized discovered asset records;
+- `metadata/asset_references.json` — exact-start code/data references to accepted assets;
+- `reports/assets.csv` — deterministic inventory with address, file offset, section, format, kind, size, confidence, extraction state, and reference count;
+- `assets/<ADDRESS>_<format>.<ext>` — only for validated assets whose complete source-file extent is known.
+
+A signature alone never authorizes arbitrary carving. GIM/PMF candidates with recognized but currently unbounded extents remain metadata-only records, and malformed candidates do not abort project analysis.
+
 ## Reference-object design and limitation
 
 Phase 5 builds the reference `.o` directly from the exact instruction words already stored in `metadata/functions.json`. The generated object is ELF32 little-endian `ET_REL`/`EM_MIPS` and contains `.text`, `.symtab`, `.strtab`, and `.shstrtab` with a global function symbol.
@@ -367,7 +405,8 @@ A matching score is meaningful only when the candidate is compiled with the appr
 - No `PT_PRXRELOC2` decompression/application yet.
 - No bundled PSP NID database; Phase 6B consumes external JSON/CSV data.
 - No direct PSPLibDoc XML or PPSSPP source parser yet.
-- No ISO/CSO filesystem extraction yet.
+- No ISO/CSO filesystem extraction or game-wide orchestration yet.
+- Phase 6D does not transcode textures/models/audio, guess proprietary archives, or carve resources whose full extent cannot be validated.
 - m2c does not understand every PSP Allegrex/VFPU instruction.
 - Synthesized Phase 5 reference objects do not yet reproduce original relocation tables.
 - No automatic PSP compiler/version identification yet.
