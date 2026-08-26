@@ -206,6 +206,11 @@ class Relocation:
     symbol_index: int
     target_section_index: int | None
     source: str = "section"
+    source_segment_index: int | None = None
+    target_segment_index: int | None = None
+    stream_offset: int | None = None
+    addend: int | None = None
+    encoding_flags: int | None = None
 
 
 @dataclass(slots=True)
