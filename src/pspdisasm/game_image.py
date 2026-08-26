@@ -474,14 +474,20 @@ def read_game_file(path: Path | str, disc_path: str) -> bytes:
 def extract_game_executables(path: Path | str, output_dir: Path | str) -> list[Path]:
     source = Path(path)
     destination = Path(output_dir)
-    analysis = analyze_game_image(source)
-    extracted: list[Path] = []
-    for executable in analysis.executables:
-        target = _safe_output_path(destination, executable.path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(read_game_file(source, executable.path))
-        extracted.append(target)
-    return extracted
+    reader = _open_image_reader(source)
+    try:
+        entries, records = _index_image(reader)
+        executables, _boot_path = _discover_executables(reader, entries, records)
+        extracted: list[Path] = []
+        for executable in executables:
+            record = records[executable.path.upper()]
+            target = _safe_output_path(destination, executable.path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(_read_record(reader, record))
+            extracted.append(target)
+        return extracted
+    finally:
+        reader.close()
 
 
 def analyze_game_image(path: Path | str) -> GameImageAnalysis:
