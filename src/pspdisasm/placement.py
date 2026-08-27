@@ -110,48 +110,111 @@ def _fixed_placement(item: ModulePlacementInput) -> ModulePlacement:
     )
 
 
+def _boot_placement(item: ModulePlacementInput) -> ModulePlacement:
+    image_base, image_size, alignment = _layout(item.model)
+    load_address = _align_up(PSP_FIRST_USER_ALLOCATION, alignment)
+    image_end = load_address + image_size
+    if image_end > UINT32_LIMIT:
+        raise ParseError("Relocatable boot module extends outside the 32-bit address space")
+
+    if load_address == PSP_FIRST_USER_ALLOCATION:
+        evidence = [
+            "Relocatable boot module uses the PSP low-allocation path; user memory starts at 0x08800000 and the initial 0x4000 bytes are reserved, making 0x08804000 the first default allocation."
+        ]
+    else:
+        evidence = [
+            "Relocatable boot module uses the PSP low-allocation path; the first default allocation is 0x08804000 and the module's PT_LOAD alignment moves the selected base to "
+            f"0x{load_address:08X}."
+        ]
+
+    return ModulePlacement(
+        path=item.path,
+        load_address=load_address,
+        original_image_base=image_base,
+        image_size=image_size,
+        image_end=image_end,
+        alignment=alignment,
+        placement_kind="boot_inferred",
+        placement_confidence=0.95,
+        runtime_address_claim=True,
+        requires_relocation=True,
+        placement_evidence=evidence,
+    )
+
+
 def plan_module_placements(inputs: list[ModulePlacementInput]) -> list[ModulePlacement]:
-    """Choose deterministic PSP addresses while separating runtime evidence from analysis-only placement."""
+    """Choose deterministic PSP addresses while separating runtime evidence from analysis-only placement.
+
+    Fixed ET_EXEC addresses and the boot module's low-allocation address are
+    independent runtime claims: separately loaded modules are not assumed to
+    coexist merely because they are present on the same disc. Synthetic
+    placements for secondary relocatable PRXs, however, avoid all recorded
+    ranges so the combined analysis address space remains deterministic and
+    collision-free.
+    """
 
     ordered = sorted(inputs, key=lambda item: item.path.casefold())
     fixed: dict[str, ModulePlacement] = {}
-    occupied: list[tuple[int, int]] = []
 
     for item in ordered:
         header = item.model.elf_header
         if header is None:
             raise ParseError(f"Runtime placement requires an ELF header for {item.path}")
-        if header.file_type != ET_EXEC:
-            continue
-        placement = _fixed_placement(item)
-        fixed[item.path] = placement
-        occupied.append((placement.load_address, placement.image_end))
+        if header.file_type == ET_EXEC:
+            fixed[item.path] = _fixed_placement(item)
 
     relocatable = [item for item in ordered if item.path not in fixed]
-    relocatable.sort(key=lambda item: (not item.is_boot, item.path.casefold()))
+    boot_items = sorted(
+        [item for item in relocatable if item.is_boot],
+        key=lambda item: item.path.casefold(),
+    )
+    secondary_items = sorted(
+        [item for item in relocatable if not item.is_boot],
+        key=lambda item: item.path.casefold(),
+    )
+
     planned: dict[str, ModulePlacement] = dict(fixed)
+    boot_ranges: list[tuple[int, int]] = []
     cursor = PSP_FIRST_USER_ALLOCATION
 
-    for item in relocatable:
+    for index, item in enumerate(boot_items):
+        if index == 0:
+            placement = _boot_placement(item)
+        else:
+            # A normal PSP disc has only one selected boot module. If callers
+            # supply more than one, keep the first evidence-backed boot claim
+            # and treat the rest conservatively as analysis-only modules.
+            image_base, image_size, alignment = _layout(item.model)
+            load_address = _find_free(cursor, image_size, alignment, boot_ranges)
+            placement = ModulePlacement(
+                path=item.path,
+                load_address=load_address,
+                original_image_base=image_base,
+                image_size=image_size,
+                image_end=load_address + image_size,
+                alignment=alignment,
+                placement_kind="analysis",
+                placement_confidence=0.50,
+                runtime_address_claim=False,
+                requires_relocation=True,
+                placement_evidence=[
+                    "Only one boot module can receive the PSP default boot-placement claim; this additional boot-marked image uses a deterministic analysis-only placement."
+                ],
+            )
+        planned[item.path] = placement
+        boot_ranges.append((placement.load_address, placement.image_end))
+        cursor = max(cursor, placement.image_end)
+
+    occupied = [
+        (placement.load_address, placement.image_end)
+        for placement in fixed.values()
+    ]
+    occupied.extend(boot_ranges)
+
+    for item in secondary_items:
         image_base, image_size, alignment = _layout(item.model)
         load_address = _find_free(cursor, image_size, alignment, occupied)
         image_end = load_address + image_size
-
-        if item.is_boot:
-            kind = "boot_inferred"
-            confidence = 0.95
-            runtime_claim = True
-            evidence = [
-                "Relocatable boot module uses the PSP low-allocation path; user memory starts at 0x08800000 and the initial 0x4000 bytes are reserved, making 0x08804000 the first default allocation."
-            ]
-        else:
-            kind = "analysis"
-            confidence = 0.50
-            runtime_claim = False
-            evidence = [
-                "Secondary PRX runtime load order and allocation direction/options are not encoded on disc; this deterministic low-memory placement is for analysis only."
-            ]
-
         placement = ModulePlacement(
             path=item.path,
             load_address=load_address,
@@ -159,11 +222,13 @@ def plan_module_placements(inputs: list[ModulePlacementInput]) -> list[ModulePla
             image_size=image_size,
             image_end=image_end,
             alignment=alignment,
-            placement_kind=kind,
-            placement_confidence=confidence,
-            runtime_address_claim=runtime_claim,
+            placement_kind="analysis",
+            placement_confidence=0.50,
+            runtime_address_claim=False,
             requires_relocation=True,
-            placement_evidence=evidence,
+            placement_evidence=[
+                "Secondary PRX runtime load order and allocation direction/options are not encoded on disc; this deterministic low-memory placement is for analysis only."
+            ],
         )
         planned[item.path] = placement
         occupied.append((load_address, image_end))
