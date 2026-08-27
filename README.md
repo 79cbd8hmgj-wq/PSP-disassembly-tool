@@ -2,7 +2,7 @@
 
 `pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, matching, and whole-game resource-analysis toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of combining upstream projects into one fork.
 
-## Current status: Phase 7F
+## Current status: Phase 7G
 
 The implemented pipeline now covers:
 
@@ -18,6 +18,7 @@ The implemented pipeline now covers:
 10. Deterministic unknown-container fingerprinting, family grouping, and safe parser-driven entry extraction.
 11. Bounded PSP `PT_PRXRELOC2` decoding with normalized relocation provenance and explicit relocation-word application primitives.
 12. Explicit caller-addressed relocated load views for single decrypted ELF/PRX disassembly and Splat project generation.
+13. Evidence-backed whole-game module placement with fixed `ET_EXEC`, inferred boot placement, and explicitly analysis-only secondary PRX addresses.
 
 ## Implemented phases
 
@@ -165,9 +166,23 @@ See [`docs/phase7e-prxreloc2.md`](docs/phase7e-prxreloc2.md) for the decoder gra
 - Keep external/unmapped values and arbitrary address-looking constants unchanged.
 - Feed one consistent relocated address space into spimdisasm, advanced analysis, NID propagation, data typing, asset discovery, Splat output, and generated metadata.
 - Expose `RelocatedLoadView` and `build_relocated_load_view()` as public APIs.
-- Add explicit `--load-address` support to single-module `disasm` and `project` commands without inventing one global address for `game-project`.
+- Add explicit `--load-address` support to single-module `disasm` and `project` commands.
 
-See [`docs/phase7f-relocated-load-view.md`](docs/phase7f-relocated-load-view.md) for the relocation semantics, safety boundaries, downstream integration, and whole-game boundary.
+See [`docs/phase7f-relocated-load-view.md`](docs/phase7f-relocated-load-view.md) for the relocation semantics, safety boundaries, and downstream integration.
+
+### Phase 7G — evidence-backed whole-game module placement
+
+- Preserve fixed `ET_EXEC` `PT_LOAD` addresses as runtime-backed placements without applying PRX relocation.
+- Place a relocatable selected boot module through the PSP default low-allocation path beginning at `0x08804000`, while honoring valid `PT_LOAD` alignment.
+- Give secondary relocatable PRXs deterministic aligned analysis addresses without claiming those addresses were observed at runtime.
+- Record placement kind, confidence, evidence, relocation requirement, original image base, and runtime-claim status for every planned module.
+- Emit `metadata/module_placements.json` and mirror placement fields into `metadata/game_analysis.json`.
+- Feed one planned address consistently into Phase 7F disassembly, relocated normalized module metadata, Splat VRAM, and the game-wide NID linker.
+- Keep the boot inference independent of separately loadable fixed modules that may legitimately occupy overlapping ranges at different times.
+- Keep synthetic secondary analysis placements collision-free across the combined static-analysis namespace.
+- Expose `ModulePlacement`, `ModulePlacementInput`, and `plan_module_placements()` as public APIs.
+
+See [`docs/phase7g-runtime-placement.md`](docs/phase7g-runtime-placement.md) for placement classes, evidence/confidence semantics, and runtime-vs-analysis boundaries.
 
 ## Installation
 
@@ -222,7 +237,7 @@ pspdisasm game-project game.iso game_decomp
 pspdisasm game-project game.cso game_decomp --nid-db psp_nids.csv
 ```
 
-`game-project` automatically runs Phase 7A, Phase 7B, Phase 7C, and the built-in Phase 7D unknown-container profiling pass. Phase 7E relocation decoding is consumed automatically by every PRX analysis performed during the workflow. Phase 7F does not assign runtime addresses to the game's independently loadable modules; explicit relocated views remain a single-module operation. Trusted title-specific parsers can additionally be supplied through the Python API.
+`game-project` automatically runs Phase 7A–7G behavior applicable to whole-game analysis. Phase 7E relocation decoding is consumed by PRX analysis; Phase 7G then chooses an evidence-backed fixed or boot placement when the executable itself supports that claim, or an explicitly analysis-only deterministic placement for secondary relocatable PRXs. The selected address is passed through the Phase 7F load-view path before disassembly/Splat/linking. Encrypted `~PSP` modules remain `needs_decryption`, and trusted title-specific container parsers can additionally be supplied through the Python API.
 
 Typical output:
 
@@ -232,6 +247,7 @@ game_decomp/
 │   ├── disc.json
 │   ├── param_sfo.json
 │   ├── game_analysis.json
+│   ├── module_placements.json
 │   ├── module_links.json
 │   ├── propagated_symbols.json
 │   ├── game_resources.json
@@ -280,7 +296,7 @@ pspdisasm disasm decrypted_EBOOT.BIN --asm-dir asm --json disassembly.json
 pspdisasm disasm module.prx --load-address 0x08900000 --json relocated.json
 ```
 
-`--load-address` accepts decimal or `0x` hexadecimal input and requests an explicit Phase 7F relocated view. Omitting it preserves the original non-rebased behavior.
+`--load-address` accepts decimal or `0x` hexadecimal input and requests an explicit Phase 7F relocated view. Omitting it preserves the original non-rebased behavior for the single-module command.
 
 ### Generate one decompilation project
 
@@ -390,6 +406,8 @@ from pspdisasm import (
     ContainerFamily,
     ContainerInspection,
     ModuleAnalysisInput,
+    ModulePlacement,
+    ModulePlacementInput,
     NidDatabase,
     RelocatedLoadView,
     ResourceContainerParser,
@@ -411,13 +429,14 @@ from pspdisasm import (
     link_modules,
     load_nid_databases,
     match_project_function,
+    plan_module_placements,
     profile_container_candidate,
     scan_game_disc,
     select_container_parser,
 )
 ```
 
-`generate_game_project()` is the high-level whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values. `decode_prxreloc2()` and `apply_psp_relocation_word()` expose the Phase 7E compressed-relocation decoder and pure word transform. `build_relocated_load_view()` returns a Phase 7F `RelocatedLoadView` at an explicit caller-provided runtime address; `disassemble_bytes()`, `disassemble_file()`, and single-module project generation accept the corresponding optional `load_address=` argument.
+`generate_game_project()` is the high-level whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values. `decode_prxreloc2()` and `apply_psp_relocation_word()` expose the Phase 7E compressed-relocation decoder and pure word transform. `build_relocated_load_view()` returns a Phase 7F `RelocatedLoadView` at an explicit caller-provided runtime address. Phase 7G exposes `ModulePlacement`, `ModulePlacementInput`, and `plan_module_placements()`; `generate_game_project()` consumes the planner automatically and records whether each chosen address is a runtime-backed claim or analysis-only placement.
 
 ## Resource-analysis safety model
 
@@ -441,14 +460,14 @@ A signature or extension alone does not authorize arbitrary carving.
 - **asm-differ** — original-vs-recompiled matching backend, kept out-of-process.
 - **pycdlib** — optional ISO9660 traversal dependency; LGPL source is not copied into the MIT core.
 - **maxcso** — CISO/CSO behavior/reference source for the clean-room reader.
-- **PPSSPP** — PSP disc/media/container/relocation behavioral reference; GPL code is not copied into the core.
+- **PPSSPP** — PSP disc/media/container/relocation/loading behavioral reference; GPL code is not copied into the core.
 - **PSPLibDoc-compatible data** — optional external NID naming input; no NID database is bundled.
 
 ## Current limitations
 
 - No PSP cryptographic decryption.
 - No GZIP/KL4E/2RLZ decompression of encrypted `~PSP` bodies.
-- No automatic runtime load-address selection or automatic per-module placement for `game-project`; Phase 7F requires an explicit address for a single relocated ELF/PRX view.
+- Secondary relocatable PRX placements in `game-project` are deterministic analysis addresses, not claimed runtime addresses; exact dynamic module placement still requires runtime evidence or an explicit single-module Phase 7F address.
 - Phase 7F applies proven relocation records only; it does not guess or rewrite unrelocated constants merely because they resemble PSP addresses.
 - Ambiguous `PT_PRXRELOC2` HI16 reuse state remains unresolved unless the caller supplies an explicit low half.
 - No bundled PSP NID database.
