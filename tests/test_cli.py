@@ -45,6 +45,26 @@ def test_cli_disasm_emits_json_and_assembly_files(tmp_path, capsys):
     assert "vzero.s" in assembly
 
 
+def test_cli_disasm_accepts_hex_load_address(tmp_path, capsys):
+    from tests.fixtures import build_allegrex_elf32
+
+    target = tmp_path / "sample.elf"
+    target.write_bytes(build_allegrex_elf32())
+
+    code = main([
+        "disasm",
+        str(target),
+        "--load-address",
+        "0x08900000",
+        "--json",
+        "-",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["functions"][0]["address"] == 0x08900000
+
+
 def test_cli_disasm_rejects_encrypted_psp_container(tmp_path, capsys):
     from tests.fixtures import build_psp_container_header
 
