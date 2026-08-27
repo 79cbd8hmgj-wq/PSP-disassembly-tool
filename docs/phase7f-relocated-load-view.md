@@ -139,7 +139,9 @@ Omitting `--load-address` preserves the existing non-rebased workflow.
 
 Phase 7F deliberately does **not** add one global `--load-address` to `game-project`.
 
-A PSP game can contain multiple independently loaded PRX modules. One user-supplied address cannot safely describe the placement of every module. Automatic or evidence-backed per-module runtime placement is therefore a separate future problem rather than an implicit Phase 7F heuristic.
+A PSP game can contain multiple independently loaded PRX modules, so one user-supplied address cannot safely describe every module. Phase 7G now owns that separate concern: it preserves fixed `ET_EXEC` addresses, infers the selected relocatable boot module from PSP allocator evidence, and assigns secondary relocatable PRXs explicitly analysis-only placements when their exact runtime address is not recoverable from the disc image.
+
+See [`phase7g-runtime-placement.md`](phase7g-runtime-placement.md) for the evidence/confidence model and whole-game integration.
 
 ## Reference and licensing boundary
 
