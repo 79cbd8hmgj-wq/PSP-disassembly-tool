@@ -13,6 +13,7 @@ from .linker import ModuleAnalysisInput, link_modules
 from .load_view import RelocatedLoadView, build_relocated_load_view
 from .matcher import match_project_function
 from .nids import NidDatabase, load_nid_databases
+from .placement import ModulePlacement, ModulePlacementInput, plan_module_placements
 from .project import generate_project
 from .prxreloc2 import apply_psp_relocation_word, decode_prxreloc2
 from .resource_containers import (
@@ -34,6 +35,8 @@ __all__ = [
     "ContainerFamily",
     "ContainerInspection",
     "ModuleAnalysisInput",
+    "ModulePlacement",
+    "ModulePlacementInput",
     "NidDatabase",
     "RelocatedLoadView",
     "ResourceContainerParser",
@@ -55,6 +58,7 @@ __all__ = [
     "link_modules",
     "load_nid_databases",
     "match_project_function",
+    "plan_module_placements",
     "profile_container_candidate",
     "scan_game_disc",
     "select_container_parser",
