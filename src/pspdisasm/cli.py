@@ -60,6 +60,12 @@ def _parser() -> argparse.ArgumentParser:
     disasm.add_argument("input", type=Path)
     disasm.add_argument("--json", metavar="PATH", help="Write normalized disassembly JSON; use '-' for stdout")
     disasm.add_argument("--asm-dir", type=Path, metavar="DIR", help="Write one assembly file per executable section")
+    disasm.add_argument(
+        "--load-address",
+        type=lambda value: int(value, 0),
+        metavar="ADDRESS",
+        help="Explicit PSP runtime load address in decimal or 0x hexadecimal form",
+    )
 
     project = sub.add_parser("project", help="Generate a Splat PSP decompilation workspace")
     project.add_argument("input", type=Path)
@@ -258,7 +264,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "disasm":
-            result = disassemble_file(args.input)
+            result = disassemble_file(args.input, load_address=args.load_address)
             if args.asm_dir is not None:
                 _write_assembly(result, args.asm_dir)
             if not _write_json(result_to_dict(result), args.json):
