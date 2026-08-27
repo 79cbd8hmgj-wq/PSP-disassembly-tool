@@ -47,6 +47,8 @@ The view rebases:
 - the ELF entrypoint when it lies inside an original loaded segment;
 - normalized PRX module/import/export/NID metadata addresses only when the original address can be proven to lie inside a loaded segment.
 
+Module import/export end pointers are range boundaries: an end pointer exactly equal to the end of a loaded segment receives the same image-wide delta as the corresponding range start.
+
 Values that do not map to an original loaded segment are preserved. Phase 7F therefore does not reinterpret arbitrary integers or external addresses as module-local pointers.
 
 ## Relocation application
@@ -87,6 +89,7 @@ Phase 7F rejects:
 
 - non-little-endian PSP load views;
 - load addresses outside unsigned 32-bit range;
+- rebased `PT_LOAD` or allocated-section ranges that would extend outside the 32-bit address space;
 - inputs with no loadable segment;
 - invalid source/target segment indices;
 - relocation source segments that are not `PT_LOAD`;
