@@ -9,6 +9,8 @@ from .prxreloc2 import apply_psp_relocation_word
 
 PT_LOAD = 1
 SHF_ALLOC = 0x2
+UINT32_MAX = 0xFFFFFFFF
+UINT32_LIMIT = 1 << 32
 
 
 @dataclass(slots=True)
@@ -93,9 +95,43 @@ def _contains_address(segment: ProgramHeader, address: int) -> bool:
     return segment.vaddr <= address < segment.vaddr + segment.memsz
 
 
+def _contains_range_end(segment: ProgramHeader, address: int) -> bool:
+    return segment.vaddr <= address <= segment.vaddr + segment.memsz
+
+
+def _require_u32_address(value: int, what: str) -> None:
+    if value < 0 or value > UINT32_MAX:
+        raise ParseError(f"{what} falls outside the 32-bit address space")
+
+
+def _require_u32_range(start: int, size: int, what: str) -> None:
+    _require_u32_address(start, what)
+    if size < 0 or start + size > UINT32_LIMIT:
+        raise ParseError(f"{what} extends outside the 32-bit address space")
+
+
+def _validate_rebased_layout(elf: ElfImage, delta: int) -> None:
+    for segment in _loaded_segments(elf):
+        new_vaddr = segment.vaddr + delta
+        new_paddr = segment.paddr + delta
+        _require_u32_range(new_vaddr, segment.memsz, f"PT_LOAD segment {segment.index}")
+        _require_u32_address(new_paddr, f"PT_LOAD segment {segment.index} physical address")
+
+    for section in elf.sections:
+        if not section.flags & SHF_ALLOC or section.size <= 0:
+            continue
+        _require_u32_range(
+            section.addr + delta,
+            section.size,
+            f"Allocated section {section.name or section.index}",
+        )
+
+
 def _rebase_loaded_address(elf: ElfImage, address: int, delta: int) -> int:
     if any(_contains_address(segment, address) for segment in _loaded_segments(elf)):
-        return (address + delta) & 0xFFFFFFFF
+        relocated = address + delta
+        _require_u32_address(relocated, "Rebased loaded address")
+        return relocated
     return address
 
 
@@ -105,25 +141,35 @@ def _rebase_nonzero_loaded_address(elf: ElfImage, address: int, delta: int) -> i
     return _rebase_loaded_address(elf, address, delta)
 
 
+def _rebase_nonzero_loaded_range_end(elf: ElfImage, address: int, delta: int) -> int:
+    if address == 0:
+        return 0
+    if any(_contains_range_end(segment, address) for segment in _loaded_segments(elf)):
+        relocated = address + delta
+        _require_u32_address(relocated, "Rebased loaded range end")
+        return relocated
+    return address
+
+
 def _rebase_elf(elf: ElfImage, data: bytes, delta: int) -> ElfImage:
     original_loads = _loaded_segments(elf)
     entry = elf.header.entry
     if any(_contains_address(segment, entry) for segment in original_loads):
-        entry = (entry + delta) & 0xFFFFFFFF
+        entry += delta
 
     header = replace(elf.header, entry=entry)
     program_headers = [
         replace(
             segment,
-            vaddr=(segment.vaddr + delta) & 0xFFFFFFFF,
-            paddr=(segment.paddr + delta) & 0xFFFFFFFF,
+            vaddr=segment.vaddr + delta,
+            paddr=segment.paddr + delta,
         )
         if segment.type == PT_LOAD
         else replace(segment)
         for segment in elf.program_headers
     ]
     sections = [
-        replace(section, addr=(section.addr + delta) & 0xFFFFFFFF)
+        replace(section, addr=section.addr + delta)
         if section.flags & SHF_ALLOC and section.size > 0
         else replace(section)
         for section in elf.sections
@@ -166,9 +212,9 @@ def _rebase_model(
             module_info,
             gp_value=_rebase_nonzero_loaded_address(original_elf, module_info.gp_value, delta),
             exports_start=_rebase_nonzero_loaded_address(original_elf, module_info.exports_start, delta),
-            exports_end=_rebase_nonzero_loaded_address(original_elf, module_info.exports_end, delta),
+            exports_end=_rebase_nonzero_loaded_range_end(original_elf, module_info.exports_end, delta),
             imports_start=_rebase_nonzero_loaded_address(original_elf, module_info.imports_start, delta),
-            imports_end=_rebase_nonzero_loaded_address(original_elf, module_info.imports_end, delta),
+            imports_end=_rebase_nonzero_loaded_range_end(original_elf, module_info.imports_end, delta),
             address=_rebase_loaded_address(original_elf, module_info.address, delta),
         )
 
@@ -194,7 +240,7 @@ def build_relocated_load_view(
 ) -> RelocatedLoadView:
     if elf.endianness != "little":
         raise ParseError("Relocated PSP load views require a little-endian ELF")
-    if load_address < 0 or load_address > 0xFFFFFFFF:
+    if load_address < 0 or load_address > UINT32_MAX:
         raise ParseError("PSP load address must fit in an unsigned 32-bit address")
 
     loads = _loaded_segments(elf)
@@ -203,11 +249,12 @@ def build_relocated_load_view(
 
     original_image_base = min(segment.vaddr for segment in loads)
     delta = load_address - original_image_base
-    if not -(1 << 32) < delta < (1 << 32):
+    if not -UINT32_LIMIT < delta < UINT32_LIMIT:
         raise ParseError("PSP relocation delta is outside the supported 32-bit range")
+    _validate_rebased_layout(elf, delta)
 
     segment_bases = {
-        segment.index: (segment.vaddr + delta) & 0xFFFFFFFF
+        segment.index: segment.vaddr + delta
         for segment in loads
     }
     patched = bytearray(data)
