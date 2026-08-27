@@ -91,6 +91,26 @@ def test_cli_project_generates_splat_workspace(tmp_path):
     assert (output / "config" / "symbols.txt").exists()
 
 
+def test_cli_project_accepts_decimal_load_address(tmp_path, capsys):
+    from tests.fixtures import build_allegrex_elf32
+
+    target = tmp_path / "sample.elf"
+    output = tmp_path / "project"
+    target.write_bytes(build_allegrex_elf32())
+
+    code = main([
+        "project",
+        str(target),
+        str(output),
+        "--load-address",
+        str(0x08900000),
+    ])
+
+    assert code == 0
+    assert "Base VRAM: 0x08900000" in capsys.readouterr().out
+    assert "_start = 0x08900000" in (output / "config" / "symbols.txt").read_text()
+
+
 def test_cli_decompile_generates_assisted_c(tmp_path, capsys):
     import json as _json
 
