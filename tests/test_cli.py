@@ -45,6 +45,26 @@ def test_cli_disasm_emits_json_and_assembly_files(tmp_path, capsys):
     assert "vzero.s" in assembly
 
 
+def test_cli_disasm_accepts_hex_load_address(tmp_path, capsys):
+    from tests.fixtures import build_allegrex_elf32
+
+    target = tmp_path / "sample.elf"
+    target.write_bytes(build_allegrex_elf32())
+
+    code = main([
+        "disasm",
+        str(target),
+        "--load-address",
+        "0x08900000",
+        "--json",
+        "-",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["functions"][0]["address"] == 0x08900000
+
+
 def test_cli_disasm_rejects_encrypted_psp_container(tmp_path, capsys):
     from tests.fixtures import build_psp_container_header
 
@@ -69,6 +89,26 @@ def test_cli_project_generates_splat_workspace(tmp_path):
     assert code == 0
     assert (output / "splat.yaml").exists()
     assert (output / "config" / "symbols.txt").exists()
+
+
+def test_cli_project_accepts_decimal_load_address(tmp_path, capsys):
+    from tests.fixtures import build_allegrex_elf32
+
+    target = tmp_path / "sample.elf"
+    output = tmp_path / "project"
+    target.write_bytes(build_allegrex_elf32())
+
+    code = main([
+        "project",
+        str(target),
+        str(output),
+        "--load-address",
+        str(0x08900000),
+    ])
+
+    assert code == 0
+    assert "Base VRAM: 0x08900000" in capsys.readouterr().out
+    assert "_start = 0x08900000" in (output / "config" / "symbols.txt").read_text()
 
 
 def test_cli_decompile_generates_assisted_c(tmp_path, capsys):

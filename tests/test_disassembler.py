@@ -16,6 +16,19 @@ def test_disassemble_bytes_runs_phase1_and_engine_analysis() -> None:
     assert {engine.name for engine in result.engines} == {"spimdisasm", "rabbitizer"}
 
 
+def test_disassemble_bytes_can_use_explicit_relocated_load_address() -> None:
+    result = disassemble_bytes(
+        build_allegrex_elf32(),
+        "synthetic.elf",
+        load_address=0x08900000,
+    )
+
+    assert [function.address for function in result.functions] == [0x08900000, 0x08900028]
+    # This fixture intentionally contains no relocation records for its literal
+    # absolute-address sequence, so Phase 7F must not guess and rewrite it.
+    assert not any(reference.target_address == 0x08900100 for reference in result.references)
+
+
 def test_disassemble_bytes_rejects_encrypted_psp_container() -> None:
     with pytest.raises(DisassemblyError, match="decryption"):
         disassemble_bytes(build_psp_container_header(), "EBOOT.BIN")

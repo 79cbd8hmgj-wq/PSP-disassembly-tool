@@ -19,6 +19,7 @@ from .model import (
 SHF_ALLOC = 0x2
 SHF_EXECINSTR = 0x4
 SHT_NOBITS = 8
+PT_LOAD = 1
 STRUCT_LIMIT = 64
 ARRAY_SIZES = (8, 12, 16, 20, 24, 32, 48, 64)
 
@@ -99,6 +100,28 @@ def _overlaps_ranges(start: int, end: int, ranges: Iterable[tuple[int, int]]) ->
     return any(start < reserved_end and reserved_start < end for reserved_start, reserved_end in ranges)
 
 
+def _resolved_relocation_slot(model: ExecutableModel, elf: ElfImage, relocation) -> int | None:
+    is_psp_segment_relative = (
+        model.executable_kind == "prx"
+        or relocation.source_segment_index is not None
+        or relocation.source in {"program_header", "program_header_rel2"}
+    )
+    if is_psp_segment_relative:
+        source_index = relocation.source_segment_index
+        if source_index is None:
+            source_index = (relocation.info >> 8) & 0xFF
+        if 0 <= source_index < len(elf.program_headers):
+            source = elf.program_headers[source_index]
+            if source.type == PT_LOAD:
+                if relocation.offset < 0 or relocation.offset + 4 > source.filesz:
+                    return None
+                address = source.vaddr + relocation.offset
+                if 0 <= address <= 0xFFFFFFFF:
+                    return address
+                return None
+    return relocation.offset
+
+
 def _safe_relocation_slots(model: ExecutableModel, elf: ElfImage) -> tuple[set[int], list[str]]:
     slots: set[int] = set()
     warning_keys: set[tuple[str, str, int]] = set()
@@ -107,23 +130,26 @@ def _safe_relocation_slots(model: ExecutableModel, elf: ElfImage) -> tuple[set[i
         model.relocations,
         key=lambda item: (item.offset, item.source, item.type_name, item.type, item.section),
     ):
-        section = _allocated_section(elf, relocation.offset, file_backed=True)
-        mapped = elf.vaddr_to_offset(relocation.offset)
+        slot_address = _resolved_relocation_slot(model, elf, relocation)
+        section = None if slot_address is None else _allocated_section(elf, slot_address, file_backed=True)
+        mapped = None if slot_address is None else elf.vaddr_to_offset(slot_address)
         if (
-            section is None
+            slot_address is None
+            or section is None
             or mapped is None
             or mapped < 0
-            or mapped >= len(elf.raw_data)
+            or mapped + 4 > len(elf.raw_data)
         ):
-            key = (relocation.source, relocation.type_name, relocation.offset)
+            warning_address = relocation.offset if slot_address is None else slot_address
+            key = (relocation.source, relocation.type_name, warning_address)
             if key not in warning_keys:
                 warning_keys.add(key)
                 warnings.append(
                     "Skipped unmappable relocation "
-                    f"source={relocation.source} type={relocation.type_name} offset=0x{relocation.offset:08X}"
+                    f"source={relocation.source} type={relocation.type_name} offset=0x{warning_address:08X}"
                 )
             continue
-        slots.add(relocation.offset)
+        slots.add(slot_address)
     return slots, warnings
 
 

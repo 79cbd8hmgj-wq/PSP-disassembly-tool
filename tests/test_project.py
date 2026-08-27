@@ -32,6 +32,24 @@ def test_project_artifacts_flatten_alloc_sections_and_render_psp_splat():
     assert "STR_08800100 = 0x08800100; // type:asciz" in artifacts.symbols
 
 
+def test_project_artifacts_can_use_explicit_relocated_load_address():
+    artifacts = build_project_artifacts(
+        build_allegrex_elf32(),
+        "sample.elf",
+        load_address=0x08900000,
+    )
+
+    assert artifacts.base_vram == 0x08900000
+    assert [function.address for function in artifacts.disassembly.functions] == [
+        0x08900000,
+        0x08900028,
+    ]
+    config = yaml.safe_load(artifacts.splat_yaml)
+    assert config["segments"][0]["vram"] == 0x08900000
+    assert "_start = 0x08900000; // type:func" in artifacts.symbols
+    assert "func_08900028 = 0x08900028; // type:func" in artifacts.symbols
+
+
 def test_generate_project_materializes_workspace(tmp_path: Path):
     source = tmp_path / "sample.elf"
     output = tmp_path / "game_decomp"

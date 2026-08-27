@@ -10,6 +10,7 @@ from .decompiler import decompile_project_function
 from .game_project import generate_game_project
 from .game_resources import analyze_game_resources
 from .linker import ModuleAnalysisInput, link_modules
+from .load_view import RelocatedLoadView, build_relocated_load_view
 from .matcher import match_project_function
 from .nids import NidDatabase, load_nid_databases
 from .project import generate_project
@@ -34,6 +35,7 @@ __all__ = [
     "ContainerInspection",
     "ModuleAnalysisInput",
     "NidDatabase",
+    "RelocatedLoadView",
     "ResourceContainerParser",
     "analyze_advanced",
     "analyze_assets",
@@ -42,6 +44,7 @@ __all__ = [
     "analyze_file",
     "analyze_game_resources",
     "apply_psp_relocation_word",
+    "build_relocated_load_view",
     "decode_prxreloc2",
     "decompile_project_function",
     "disassemble_bytes",
