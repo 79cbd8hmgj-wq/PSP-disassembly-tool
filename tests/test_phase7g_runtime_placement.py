@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import struct
 
 import yaml
 
@@ -12,6 +13,20 @@ from tests.test_game_project import _build_game_iso
 def _module_record(output, path: str) -> dict[str, object]:
     analysis = json.loads((output / "metadata/game_analysis.json").read_text(encoding="utf-8"))
     return {record["path"]: record for record in analysis["modules"]}[path]
+
+
+def _build_relocatable_prx_without_relocations() -> bytes:
+    """Placement fixture with PRX metadata but no intentionally malformed legacy reloc record."""
+    payload = bytearray(build_prx_elf32(include_prxreloc2=False))
+    shoff = struct.unpack_from("<I", payload, 0x20)[0]
+    # build_prx_elf32()'s section 5 is a synthetic .rel.text fixture whose
+    # segment selector intentionally does not identify the only PT_LOAD. That
+    # fixture is useful for parser tests but invalid for exercising Phase 7F
+    # relocation application. Reclassify it as ordinary file data here so this
+    # integration test isolates runtime placement rather than malformed-reloc
+    # handling.
+    struct.pack_into("<I", payload, shoff + 5 * 0x28 + 4, 1)
+    return bytes(payload)
 
 
 def test_game_project_records_fixed_et_exec_placement_without_relocation(tmp_path):
@@ -36,7 +51,7 @@ def test_game_project_records_fixed_et_exec_placement_without_relocation(tmp_pat
 def test_game_project_places_relocatable_boot_at_first_psp_user_allocation(tmp_path):
     image = tmp_path / "relocatable.iso"
     output = tmp_path / "relocatable_decomp"
-    _build_game_iso(image, eboot=build_prx_elf32())
+    _build_game_iso(image, eboot=_build_relocatable_prx_without_relocations())
 
     generate_game_project(image, output)
 
@@ -77,12 +92,13 @@ def test_game_project_places_relocatable_boot_at_first_psp_user_allocation(tmp_p
 def test_secondary_prxs_receive_unique_aligned_analysis_only_placements(tmp_path):
     image = tmp_path / "secondary.iso"
     output = tmp_path / "secondary_decomp"
+    relocatable = _build_relocatable_prx_without_relocations()
     _build_game_iso(
         image,
-        eboot=build_prx_elf32(),
+        eboot=relocatable,
         modules={
-            "PSP_GAME/USRDIR/A.PRX": build_prx_elf32(),
-            "PSP_GAME/USRDIR/B.PRX": build_prx_elf32(),
+            "PSP_GAME/USRDIR/A.PRX": relocatable,
+            "PSP_GAME/USRDIR/B.PRX": relocatable,
         },
     )
 
