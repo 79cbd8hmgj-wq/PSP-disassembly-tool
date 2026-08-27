@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import struct
 
+import pytest
+
+from pspdisasm.errors import ParseError
 from pspdisasm.load_view import build_relocated_load_view
 from pspdisasm.model import (
     ElfHeader,
@@ -190,3 +193,32 @@ def test_relocated_load_view_rebases_loaded_prx_metadata_without_touching_extern
     assert view.model.imports[0].address == 0x08800030
     assert view.model.imports[0].functions[0].address == 0x08800014
     assert view.model.imports[0].functions[0].nid_address == 0x08800034
+
+
+def test_relocated_load_view_rebases_module_range_end_at_segment_boundary():
+    data, elf, model = _single_segment_fixture(words=(0,) * 16, relocations=[])
+    model.module_info = ModuleInfo(
+        attributes=0,
+        version=(1, 0),
+        name="fixture",
+        gp_value=0,
+        exports_start=0x70,
+        exports_end=0x80,
+        imports_start=0x78,
+        imports_end=0x80,
+        address=0x08,
+        location=".rodata.sceModuleInfo",
+    )
+
+    view = build_relocated_load_view(data, elf, model, load_address=0x08800000)
+
+    assert view.model.module_info is not None
+    assert view.model.module_info.exports_end == 0x08800080
+    assert view.model.module_info.imports_end == 0x08800080
+
+
+def test_relocated_load_view_rejects_segment_address_space_wraparound():
+    data, elf, model = _single_segment_fixture(relocations=[])
+
+    with pytest.raises(ParseError, match="32-bit address space"):
+        build_relocated_load_view(data, elf, model, load_address=0xFFFFFFC0)
