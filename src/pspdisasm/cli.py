@@ -78,6 +78,12 @@ def _parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
     )
+    project.add_argument(
+        "--load-address",
+        type=lambda value: int(value, 0),
+        metavar="ADDRESS",
+        help="Explicit PSP runtime load address in decimal or 0x hexadecimal form",
+    )
 
     link = sub.add_parser("link", help="Resolve and link PSP imports/exports across multiple modules")
     link.add_argument("inputs", type=Path, nargs="+", metavar="MODULE")
@@ -272,7 +278,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "project":
-            result = generate_project(args.input, args.output, nid_databases=args.nid_db)
+            result = generate_project(
+                args.input,
+                args.output,
+                nid_databases=args.nid_db,
+                load_address=args.load_address,
+            )
             print(f"Project: {result.output_dir}")
             print(f"Base VRAM: 0x{result.base_vram:08X}")
             print(f"Target size: 0x{result.target_size:X}")
