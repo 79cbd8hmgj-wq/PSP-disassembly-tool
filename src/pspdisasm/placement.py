@@ -55,10 +55,12 @@ def _layout(model: ExecutableModel) -> tuple[int, int, int]:
     if image_size <= 0 or image_end > UINT32_LIMIT:
         raise ParseError("Runtime placement image extends outside the 32-bit address space")
 
-    requested = segments[0].align
-    if requested <= 1 or requested & (requested - 1):
-        requested = PSP_ALLOCATOR_GRAIN
-    alignment = max(PSP_ALLOCATOR_GRAIN, requested)
+    alignment = PSP_ALLOCATOR_GRAIN
+    for segment in segments:
+        requested = segment.align
+        if requested <= 1 or requested & (requested - 1):
+            requested = PSP_ALLOCATOR_GRAIN
+        alignment = max(alignment, requested)
     return image_base, image_size, alignment
 
 
@@ -123,7 +125,7 @@ def _boot_placement(item: ModulePlacementInput) -> ModulePlacement:
         ]
     else:
         evidence = [
-            "Relocatable boot module uses the PSP low-allocation path; the first default allocation is 0x08804000 and the module's PT_LOAD alignment moves the selected base to "
+            "Relocatable boot module uses the PSP low-allocation path; the first default allocation is 0x08804000 and the strictest PT_LOAD alignment moves the selected base to "
             f"0x{load_address:08X}."
         ]
 
