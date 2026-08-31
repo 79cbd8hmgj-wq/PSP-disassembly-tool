@@ -1,6 +1,7 @@
 """PSP executable analysis and Allegrex disassembly toolkit."""
 
 from .advanced import analyze_advanced
+from .analysis_pack import AnalysisPackResult, create_analysis_pack
 from .analyzer import analyze_bytes, analyze_file
 from .asset_discovery import analyze_assets
 from .data_typing import analyze_data_types
@@ -38,6 +39,7 @@ from .workspace import (
 __version__ = "0.9.0"
 
 __all__ = [
+    "AnalysisPackResult",
     "ContainerCandidateProfile",
     "ContainerEntry",
     "ContainerFamily",
@@ -60,6 +62,7 @@ __all__ = [
     "analyze_game_workspace",
     "apply_psp_relocation_word",
     "build_relocated_load_view",
+    "create_analysis_pack",
     "decode_prxreloc2",
     "decompile_project_function",
     "disassemble_bytes",
