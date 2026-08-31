@@ -398,7 +398,7 @@ def _analysis_key(manifest: GameWorkspaceManifest, nid_databases: Iterable[Path 
     payload = {
         "source_identity": manifest.source_identity,
         "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
-        "toolkit_version": manifest.toolkit_version,
+        "toolkit_version": _toolkit_version(),
         "nid_databases": nid_identity,
     }
     return hashlib.sha256(
