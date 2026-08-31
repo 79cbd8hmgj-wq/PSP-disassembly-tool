@@ -15,5 +15,7 @@ jobs:
           python-version: '3.12'
       - name: Install package and analysis engines
         run: python -m pip install -e '.[analysis,disc]' pytest
+      - name: Reject retail/runtime payloads
+        run: python tools/check_repository_payloads.py
       - name: Run tests
         run: PYTHONPATH=src python -m pytest -q
