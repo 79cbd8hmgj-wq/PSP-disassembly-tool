@@ -28,3 +28,7 @@ class MatchingError(RuntimeError):
 
 class WorkspaceError(RuntimeError):
     """Raised when a local PSP workspace cannot be prepared or used safely."""
+
+
+class AnalysisPackError(WorkspaceError):
+    """Raised when a portable analysis pack cannot be produced safely."""
