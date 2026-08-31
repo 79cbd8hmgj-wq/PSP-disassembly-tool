@@ -12,6 +12,9 @@ from pspdisasm.workspace import analyze_game_workspace, prepare_game_workspace
 from tests.test_workspace import _build_extracted_game
 
 
+DEFAULT_PACK_MAX_BYTES = 16 * 1024 * 1024
+
+
 def _analyzed_workspace(tmp_path: Path) -> Path:
     source = tmp_path / "source"
     workspace = tmp_path / "workspace"
@@ -101,6 +104,29 @@ def test_function_pack_contains_only_selected_function_evidence(tmp_path):
         assert "evidence/context.bin" in archive.namelist()
 
 
+def test_function_pack_auto_selects_only_analyzed_module(tmp_path):
+    workspace = _analyzed_workspace(tmp_path)
+    functions_path = (
+        workspace
+        / "analysis/game_project/projects/PSP_GAME/SYSDIR/EBOOT.BIN/metadata/functions.json"
+    )
+    selected = json.loads(functions_path.read_text(encoding="utf-8"))[0]
+    output = tmp_path / "function-auto.zip"
+
+    result = create_analysis_pack(
+        workspace,
+        output,
+        function=selected["name"],
+        context_bytes=32,
+    )
+
+    assert result.selector_kind == "function"
+    assert result.selector_value == selected["name"]
+    with zipfile.ZipFile(output) as archive:
+        manifest = json.loads(archive.read("pack-manifest.json"))
+    assert manifest["source"]["path"] == "PSP_GAME/SYSDIR/EBOOT.BIN"
+
+
 def test_resource_pack_includes_record_and_bounded_sample(tmp_path):
     workspace = _analyzed_workspace(tmp_path)
     output = tmp_path / "resource.zip"
@@ -118,6 +144,62 @@ def test_resource_pack_includes_record_and_bounded_sample(tmp_path):
         sample = archive.read("evidence/resource-sample.bin")
         assert record["path"] == "PSP_GAME/USRDIR/TEXTURE.PNG"
         assert sample == b"\x89PNG\r\n\x1a\n"
+
+
+def test_large_sources_use_bounded_pack_evidence(tmp_path):
+    source = tmp_path / "large-source"
+    workspace = tmp_path / "large-workspace"
+    _build_extracted_game(source)
+
+    eboot = source / "PSP_GAME/SYSDIR/EBOOT.BIN"
+    with eboot.open("r+b") as handle:
+        handle.truncate(DEFAULT_PACK_MAX_BYTES + 4096)
+
+    large_resource = source / "PSP_GAME/USRDIR/LARGE.DAT"
+    with large_resource.open("wb") as handle:
+        handle.write(b"large-resource-header")
+        handle.truncate(DEFAULT_PACK_MAX_BYTES + 8192)
+
+    prepare_game_workspace(source, workspace)
+    analyze_game_workspace(workspace)
+
+    module_output = tmp_path / "large-module.zip"
+    create_analysis_pack(
+        workspace,
+        module_output,
+        module="PSP_GAME/SYSDIR/EBOOT.BIN",
+    )
+    with zipfile.ZipFile(module_output) as archive:
+        assert "evidence/module.json" in archive.namelist()
+        assert "evidence/module.bin" not in archive.namelist()
+
+    functions_path = (
+        workspace
+        / "analysis/game_project/projects/PSP_GAME/SYSDIR/EBOOT.BIN/metadata/functions.json"
+    )
+    selected = json.loads(functions_path.read_text(encoding="utf-8"))[0]
+    function_output = tmp_path / "large-function.zip"
+    create_analysis_pack(
+        workspace,
+        function_output,
+        module="PSP_GAME/SYSDIR/EBOOT.BIN",
+        function=selected["name"],
+        context_bytes=64,
+    )
+    with zipfile.ZipFile(function_output) as archive:
+        assert "evidence/context.bin" in archive.namelist()
+        assert len(archive.read("evidence/context.bin")) <= selected["size"] + 128
+
+    resource_output = tmp_path / "large-resource.zip"
+    create_analysis_pack(
+        workspace,
+        resource_output,
+        resource="PSP_GAME/USRDIR/LARGE.DAT",
+        context_bytes=32,
+    )
+    with zipfile.ZipFile(resource_output) as archive:
+        assert archive.read("evidence/resource-sample.bin").startswith(b"large-resource-header")
+        assert "evidence/resource.bin" not in archive.namelist()
 
 
 def test_pack_rejects_unsafe_selector_and_too_small_budget(tmp_path):
