@@ -6,7 +6,13 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from .analyzer import analyze_file
-from .disc import GameModuleRecord, extract_disc_resources, scan_game_disc
+from .disc import (
+    GameModuleRecord,
+    extract_directory_resources,
+    extract_disc_resources,
+    scan_game_directory,
+    scan_game_disc,
+)
 from .disassembler import disassemble_file
 from .elf32 import parse_elf32
 from .errors import DisassemblyError, EngineUnavailableError, ParseError
@@ -147,9 +153,14 @@ def generate_game_project(
     output = Path(output_dir)
     database_paths = tuple(nid_databases)
     parsers = tuple(container_parsers)
-    manifest = scan_game_disc(source_path, output)
 
-    resource_files = extract_disc_resources(source_path, output, manifest=manifest)
+    if source_path.is_dir():
+        manifest = scan_game_directory(source_path, output)
+        resource_files = extract_directory_resources(source_path, output, manifest=manifest)
+    else:
+        manifest = scan_game_disc(source_path, output)
+        resource_files = extract_disc_resources(source_path, output, manifest=manifest)
+
     resource_analysis = analyze_game_resources(
         str(source_path),
         output,
