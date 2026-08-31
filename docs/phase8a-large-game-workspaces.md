@@ -40,11 +40,19 @@ pspdisasm make-pack /path/to/game-workspace \
   --output eboot-analysis.zip
 ```
 
-Create a function evidence pack:
+Create a function evidence pack with an explicit module:
 
 ```bash
 pspdisasm make-pack /path/to/game-workspace \
   --module PSP_GAME/SYSDIR/EBOOT.BIN \
+  --function 0x08804000 \
+  --output function-analysis.zip
+```
+
+When exactly one analyzed module is available, `--module` may be omitted:
+
+```bash
+pspdisasm make-pack /path/to/game-workspace \
   --function 0x08804000 \
   --output function-analysis.zip
 ```
@@ -57,7 +65,7 @@ pspdisasm make-pack /path/to/game-workspace \
   --output resource-analysis.zip
 ```
 
-Existing direct workflows such as `pspdisasm game-project game.iso output/` remain supported.
+Existing direct workflows such as `pspdisasm game-project game.iso output/` remain supported. `game-project` also accepts an already-extracted PSP directory directly.
 
 ## Workspace layout
 
@@ -102,22 +110,22 @@ All large source hashing is streamed in bounded chunks. Preparing an ISO/CSO doe
 
 - workspace `source_identity`;
 - analysis schema version;
-- toolkit version;
+- the currently installed toolkit version;
 - the content identities of supplied NID databases.
 
 When that key matches `analysis/state.json` and the required whole-game analysis output is present, the previous result is reused.
 
 The machine-local source snapshot is validated before reuse. If the source changes, analysis is refused with an instruction to run `prepare-game` again rather than silently trusting stale metadata.
 
-A completed `analysis/state.json` is written only after successful whole-game analysis. Interrupted or failed analysis therefore does not create a false completed-state marker.
+A completed `analysis/state.json` is written only after successful whole-game analysis. Interrupted or failed analysis therefore does not create a false completed-state marker. Installing a different toolkit version changes the analysis key and forces regeneration instead of reusing stale results.
 
 ## Extracted directory support
 
 Phase 8A accepts an already-extracted PSP filesystem in addition to ISO/CSO input.
 
-Directory preparation walks regular files only and rejects symlinks. Whole-game analysis stages the extracted tree into a temporary local ISO and then passes it through the existing Phase 7 analysis pipeline. The temporary image is not repository content and is deleted when the operation ends.
+Directory preparation and whole-game analysis walk regular files only and reject symlinks. The Phase 7 game-project path dispatches directly to directory-specific scan and resource-copy helpers, preserving the original logical path casing. Executable candidates are mirrored beneath `modules/<logical-path>` and resource files are streamed beneath `resources/files/<logical-path>` before the established Phase 7 module/resource analyzers run.
 
-This keeps Phase 7's established disc/module/resource behavior authoritative instead of creating a second independent analysis implementation.
+ISO/CSO behavior remains on the existing disc-image path. Directory support therefore shares the same downstream Phase 7 analysis implementation without creating or depending on a temporary ISO.
 
 ## Analysis packs
 
@@ -126,8 +134,10 @@ Analysis packs are deterministic ZIP files designed to transfer only the evidenc
 Supported initial selectors are:
 
 - a module by exact logical path;
-- a function by exact function name or address, with a module selector for disambiguation;
+- a function by exact function name or address, optionally paired with a module selector for disambiguation;
 - a resource by exact logical path.
+
+A function selector without `--module` is accepted only when exactly one analyzed module is available. Otherwise the module must be supplied explicitly.
 
 A pack contains a deterministic `pack-manifest.json` with:
 
@@ -151,7 +161,7 @@ Module packs may include:
 - functions, symbols, references, and strings;
 - selected module bytes when they fit within the pack budget.
 
-Generated JSON is portableized before export so machine-local workspace paths are not leaked.
+Generated JSON is portableized before export so machine-local workspace paths are not leaked. The complete parent module is always provenance-verified by streamed size/SHA-256 checks even when it is too large to include in the ZIP.
 
 ### Function packs
 
@@ -164,6 +174,8 @@ Function packs include only the selected function's useful neighborhood:
 - a bounded byte context mapped through executable section metadata;
 - parent module SHA-256 and slice offset provenance.
 
+Large parent modules are not loaded wholesale merely to produce a function pack. The parent is verified by streamed SHA-256 and only the bounded function context is read into the pack.
+
 ### Resource packs
 
 Resource packs include:
@@ -173,7 +185,7 @@ Resource packs include:
 - the complete selected resource only when it fits the configured pack budget;
 - related embedded-resource/container records when available.
 
-All selected module/resource bytes are checked against the workspace-recorded size and SHA-256 before they are exported.
+The complete parent resource is provenance-verified by streamed size/SHA-256 checks. If the resource is larger than the pack budget, the bounded sample can still be exported without reading or embedding the full file in memory.
 
 ## Pack limits and containment
 
@@ -186,7 +198,7 @@ Both are configurable with:
 --context-bytes N
 ```
 
-Pack generation fails before leaving a completed output when the budget would be exceeded.
+Pack generation fails before leaving a completed output when required evidence plus the manifest would exceed the budget. Optional full module/resource payloads are omitted when necessary to preserve the configured bound.
 
 Logical selectors reject absolute paths and `..` traversal. Analysis paths are contained beneath the generated game-project root. Pack output paths reject symlink components so a requested destination cannot silently escape through a symlink.
 
