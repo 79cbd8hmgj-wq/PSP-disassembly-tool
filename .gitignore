@@ -7,3 +7,20 @@ build/
 *.egg-info/
 
 .worktrees/
+
+# Phase 8A: retail PSP images and runtime artifacts stay local.
+*.iso
+*.cso
+*.zso
+*.dax
+*.ppst
+*.savestate
+*.memdump
+*.memory
+
+# Machine-local workspace state, caches, and portable packs.
+.pspdisasm-local.json
+.pspdisasm-workspace/
+**/.pspdisasm-workspace/
+**/cache/
+**/packs/

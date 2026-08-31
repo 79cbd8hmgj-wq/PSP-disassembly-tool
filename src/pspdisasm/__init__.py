@@ -1,13 +1,13 @@
 """PSP executable analysis and Allegrex disassembly toolkit."""
 
 from .advanced import analyze_advanced
+from .analysis_pack import AnalysisPackResult, create_analysis_pack
 from .analyzer import analyze_bytes, analyze_file
 from .asset_discovery import analyze_assets
 from .data_typing import analyze_data_types
 from .disc import scan_game_disc
 from .disassembler import disassemble_bytes, disassemble_file
 from .decompiler import decompile_project_function
-from .game_project import generate_game_project
 from .game_resources import analyze_game_resources
 from .linker import ModuleAnalysisInput, link_modules
 from .load_view import RelocatedLoadView, build_relocated_load_view
@@ -26,28 +26,43 @@ from .resource_containers import (
     profile_container_candidate,
     select_container_parser,
 )
+from .workspace import (
+    GameWorkspaceManifest,
+    WorkspaceAnalysisResult,
+    WorkspaceFileRecord,
+    analyze_game_workspace,
+    generate_game_project,
+    load_game_workspace,
+    prepare_game_workspace,
+)
 
 __version__ = "0.9.0"
 
 __all__ = [
+    "AnalysisPackResult",
     "ContainerCandidateProfile",
     "ContainerEntry",
     "ContainerFamily",
     "ContainerInspection",
+    "GameWorkspaceManifest",
     "ModuleAnalysisInput",
     "ModulePlacement",
     "ModulePlacementInput",
     "NidDatabase",
     "RelocatedLoadView",
     "ResourceContainerParser",
+    "WorkspaceAnalysisResult",
+    "WorkspaceFileRecord",
     "analyze_advanced",
     "analyze_assets",
     "analyze_bytes",
     "analyze_data_types",
     "analyze_file",
     "analyze_game_resources",
+    "analyze_game_workspace",
     "apply_psp_relocation_word",
     "build_relocated_load_view",
+    "create_analysis_pack",
     "decode_prxreloc2",
     "decompile_project_function",
     "disassemble_bytes",
@@ -56,9 +71,11 @@ __all__ = [
     "generate_project",
     "group_container_families",
     "link_modules",
+    "load_game_workspace",
     "load_nid_databases",
     "match_project_function",
     "plan_module_placements",
+    "prepare_game_workspace",
     "profile_container_candidate",
     "scan_game_disc",
     "select_container_parser",
