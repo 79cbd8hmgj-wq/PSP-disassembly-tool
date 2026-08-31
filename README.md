@@ -2,7 +2,7 @@
 
 `pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, matching, and whole-game resource-analysis toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of combining upstream projects into one fork.
 
-## Current status: Phase 7G
+## Current status: Phase 8A
 
 The implemented pipeline now covers:
 
@@ -19,6 +19,7 @@ The implemented pipeline now covers:
 11. Bounded PSP `PT_PRXRELOC2` decoding with normalized relocation provenance and explicit relocation-word application primitives.
 12. Explicit caller-addressed relocated load views for single decrypted ELF/PRX disassembly and Splat project generation.
 13. Evidence-backed whole-game module placement with fixed `ET_EXEC`, inferred boot placement, and explicitly analysis-only secondary PRX addresses.
+14. Local large-game workspaces with deterministic manifests, resumable whole-game analysis, bounded portable analysis packs, and tracked-content payload guards.
 
 ## Implemented phases
 
@@ -184,6 +185,21 @@ See [`docs/phase7f-relocated-load-view.md`](docs/phase7f-relocated-load-view.md)
 
 See [`docs/phase7g-runtime-placement.md`](docs/phase7g-runtime-placement.md) for placement classes, evidence/confidence semantics, and runtime-vs-analysis boundaries.
 
+### Phase 8A — large game workspaces and selective evidence packs
+
+- Keep original ISO/CSO images and extracted game trees on the user's machine instead of treating GitHub as retail-game storage.
+- Prepare deterministic portable workspace manifests from ISO, CSO, or already-extracted PSP filesystems.
+- Hash large source files in bounded chunks and derive a path-independent `source_identity` from normalized logical file identities.
+- Keep absolute source locations in machine-local `.pspdisasm-local.json` rather than portable workspace metadata.
+- Resume whole-game analysis only when source identity, toolkit/schema state, NID inputs, and the local source snapshot still match.
+- Reuse the established Phase 7 whole-game analysis implementation for workspace analysis, including extracted-directory inputs.
+- Generate deterministic bounded ZIP analysis packs for one module, one function neighborhood, or one resource.
+- Verify selected bytes against manifest size/SHA-256 provenance and remove machine-local paths from portable JSON evidence.
+- Reject traversal and symlink escapes at workspace/analysis-pack boundaries.
+- Enforce a tracked-content repository guard in CI for PSP disc/runtime payloads, generated workspace payload trees, and oversized opaque game binaries.
+
+See [`docs/phase8a-large-game-workspaces.md`](docs/phase8a-large-game-workspaces.md) for workspace layout, resume semantics, analysis-pack schemas, size limits, and repository payload policy.
+
 ## Installation
 
 Core parsing:
@@ -280,6 +296,49 @@ The CLI summary reports executable/module counts plus:
 - unknown container candidates;
 - containers inspected by supplied parsers;
 - accepted/extracted container entries.
+
+### Large-game local workspace
+
+For game payloads that should remain outside GitHub, prepare a deterministic local workspace from an ISO, CSO, or extracted PSP directory:
+
+```bash
+pspdisasm prepare-game /path/to/game.iso /path/to/game-workspace
+pspdisasm prepare-game /path/to/extracted-game /path/to/game-workspace
+```
+
+Run or resume the existing whole-game analysis pipeline against that workspace:
+
+```bash
+pspdisasm analyze-workspace /path/to/game-workspace
+pspdisasm analyze-workspace /path/to/game-workspace --nid-db psp_nids.csv
+```
+
+Create a bounded portable evidence pack for a selected module:
+
+```bash
+pspdisasm make-pack /path/to/game-workspace \
+  --module PSP_GAME/SYSDIR/EBOOT.BIN \
+  --output eboot-analysis.zip
+```
+
+A function pack uses the module to disambiguate the function selector:
+
+```bash
+pspdisasm make-pack /path/to/game-workspace \
+  --module PSP_GAME/SYSDIR/EBOOT.BIN \
+  --function 0x08804000 \
+  --output function-analysis.zip
+```
+
+A resource pack selects the exact logical resource path:
+
+```bash
+pspdisasm make-pack /path/to/game-workspace \
+  --resource PSP_GAME/USRDIR/example.dat \
+  --output resource-analysis.zip
+```
+
+The default pack evidence budget is 16 MiB with a 4096-byte context window; `--max-bytes` and `--context-bytes` can lower or raise those limits explicitly. Portable manifests and pack metadata omit the machine-local game location. Existing direct `game-project` workflows remain supported.
 
 ### Analyze one executable
 
@@ -401,24 +460,30 @@ Representative public entry points:
 
 ```python
 from pspdisasm import (
+    AnalysisPackResult,
     ContainerCandidateProfile,
     ContainerEntry,
     ContainerFamily,
     ContainerInspection,
+    GameWorkspaceManifest,
     ModuleAnalysisInput,
     ModulePlacement,
     ModulePlacementInput,
     NidDatabase,
     RelocatedLoadView,
     ResourceContainerParser,
+    WorkspaceAnalysisResult,
+    WorkspaceFileRecord,
     analyze_advanced,
     analyze_assets,
     analyze_bytes,
     analyze_data_types,
     analyze_file,
     analyze_game_resources,
+    analyze_game_workspace,
     apply_psp_relocation_word,
     build_relocated_load_view,
+    create_analysis_pack,
     decode_prxreloc2,
     decompile_project_function,
     disassemble_bytes,
@@ -427,16 +492,18 @@ from pspdisasm import (
     generate_project,
     group_container_families,
     link_modules,
+    load_game_workspace,
     load_nid_databases,
     match_project_function,
     plan_module_placements,
+    prepare_game_workspace,
     profile_container_candidate,
     scan_game_disc,
     select_container_parser,
 )
 ```
 
-`generate_game_project()` is the high-level whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values. `decode_prxreloc2()` and `apply_psp_relocation_word()` expose the Phase 7E compressed-relocation decoder and pure word transform. `build_relocated_load_view()` returns a Phase 7F `RelocatedLoadView` at an explicit caller-provided runtime address. Phase 7G exposes `ModulePlacement`, `ModulePlacementInput`, and `plan_module_placements()`; `generate_game_project()` consumes the planner automatically and records whether each chosen address is a runtime-backed claim or analysis-only placement.
+`generate_game_project()` is the high-level direct whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values. `decode_prxreloc2()` and `apply_psp_relocation_word()` expose the Phase 7E compressed-relocation decoder and pure word transform. `build_relocated_load_view()` returns a Phase 7F `RelocatedLoadView` at an explicit caller-provided runtime address. Phase 7G exposes `ModulePlacement`, `ModulePlacementInput`, and `plan_module_placements()`; `generate_game_project()` consumes the planner automatically and records whether each chosen address is a runtime-backed claim or analysis-only placement. Phase 8A exposes `GameWorkspaceManifest`, `WorkspaceFileRecord`, `WorkspaceAnalysisResult`, `prepare_game_workspace()`, `load_game_workspace()`, `analyze_game_workspace()`, `AnalysisPackResult`, and `create_analysis_pack()` for local large-game workflows and selective portable evidence.
 
 ## Resource-analysis safety model
 
@@ -449,6 +516,8 @@ A signature or extension alone does not authorize arbitrary carving.
 - Phase 7D still validates every parser-provided entry path and byte range independently.
 - Full embedded scanning is capped at 64 MiB per loose resource file.
 - Traversal and symlink escapes from output roots are fatal.
+- Phase 8A analysis-pack selectors reject absolute/traversal paths, selected bytes must match workspace provenance, and output paths reject symlink components.
+- Commercial disc/runtime payloads and generated workspace payload trees are blocked from tracked repository content by the CI payload guard.
 - Ordinary malformed/unsupported resources, parser failures, and invalid byte ranges are isolated and recorded rather than aborting the complete game run.
 
 ## Upstream tool roles
@@ -481,6 +550,7 @@ A signature or extension alone does not authorize arbitrary carving.
 - Synthesized Phase 5 reference objects do not yet reproduce original relocation tables.
 - No automatic PSP compiler/version identification yet.
 - Phase 6C infers conservative structural candidates; it does not claim exact C struct/header recovery.
+- Phase 8A does not upload, remotely host, decrypt, or recover retail game data; the original game remains required locally when analysis needs bytes outside a selected pack.
 
 ## Development
 
@@ -488,7 +558,8 @@ Install test dependencies and run the complete synthetic suite:
 
 ```bash
 python -m pip install -e '.[analysis,disc]' pytest
+python tools/check_repository_payloads.py
 PYTHONPATH=src python -m pytest -q
 ```
 
-The GitHub Actions workflow runs the same implemented dependency set on pushes and pull requests. Tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, CSO, resource, relocation, and container structures; no commercial game data is included.
+The GitHub Actions workflow runs the repository payload guard before the same implemented dependency/test set on pushes and pull requests. Tests use synthetic PSP-like ELF/PRX, PARAM.SFO, ISO9660, CSO, resource, relocation, container, workspace, and analysis-pack structures; no commercial game data is included.
