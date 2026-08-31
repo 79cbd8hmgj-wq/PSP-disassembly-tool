@@ -14,6 +14,8 @@ from .workspace import GameWorkspaceManifest, WorkspaceFileRecord, load_game_wor
 DEFAULT_PACK_MAX_BYTES = 16 * 1024 * 1024
 DEFAULT_CONTEXT_BYTES = 4096
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
+_HASH_CHUNK_BYTES = 1024 * 1024
+_OPTIONAL_FULL_ARTIFACTS = {"evidence/module.bin", "evidence/resource.bin"}
 
 
 @dataclass(slots=True)
@@ -104,11 +106,16 @@ def _analysis_root(workspace: Path) -> Path:
     return root
 
 
-def _module_record(analysis_root: Path, logical_path: str) -> dict[str, object]:
-    selected = _safe_logical_path(logical_path)
+def _game_analysis(analysis_root: Path) -> dict[str, object]:
     payload = _load_json(analysis_root / "metadata/game_analysis.json", label="game analysis")
     if not isinstance(payload, dict) or not isinstance(payload.get("modules"), list):
         raise AnalysisPackError("Game analysis has an invalid module schema")
+    return payload
+
+
+def _module_record(analysis_root: Path, logical_path: str) -> dict[str, object]:
+    selected = _safe_logical_path(logical_path)
+    payload = _game_analysis(analysis_root)
     matches = [
         record
         for record in payload["modules"]
@@ -118,6 +125,23 @@ def _module_record(analysis_root: Path, logical_path: str) -> dict[str, object]:
     ]
     if len(matches) != 1:
         raise AnalysisPackError(f"Analyzed module was not found uniquely: {logical_path}")
+    return matches[0]
+
+
+def _single_analyzed_module(analysis_root: Path) -> dict[str, object]:
+    payload = _game_analysis(analysis_root)
+    matches = [
+        record
+        for record in payload["modules"]
+        if isinstance(record, dict)
+        and record.get("status") == "analyzed"
+        and isinstance(record.get("path"), str)
+        and isinstance(record.get("project_path"), str)
+    ]
+    if len(matches) != 1:
+        raise AnalysisPackError(
+            "Function pack is ambiguous without --module; select an analyzed module explicitly"
+        )
     return matches[0]
 
 
@@ -138,6 +162,29 @@ def _resource_record(analysis_root: Path, logical_path: str) -> dict[str, object
     return matches[0]
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(_HASH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError as exc:
+        raise AnalysisPackError(f"Unable to hash selected source bytes: {exc}") from exc
+    return digest.hexdigest()
+
+
+def _verify_source_file(record: WorkspaceFileRecord, path: Path) -> None:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise AnalysisPackError(f"Unable to stat selected source bytes: {exc}") from exc
+    if size != record.size or _sha256_path(path) != record.sha256:
+        raise AnalysisPackError(f"Analysis bytes no longer match workspace provenance: {record.path}")
+
+
 def _read_small_file(path: Path, *, max_bytes: int, label: str) -> bytes:
     try:
         size = path.stat().st_size
@@ -145,27 +192,35 @@ def _read_small_file(path: Path, *, max_bytes: int, label: str) -> bytes:
         raise AnalysisPackError(f"Unable to stat {label}: {exc}") from exc
     if size > max_bytes:
         raise AnalysisPackError(f"{label} exceeds the analysis-pack budget")
-    data = bytearray()
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise AnalysisPackError(f"Unable to read {label}: {exc}") from exc
+
+
+def _read_slice(path: Path, offset: int, size: int, *, label: str) -> bytes:
+    if offset < 0 or size < 0:
+        raise AnalysisPackError(f"Invalid {label} byte range")
     try:
         with path.open("rb") as handle:
-            while len(data) < size:
-                chunk = handle.read(min(1024 * 1024, size - len(data)))
-                if not chunk:
-                    break
-                data.extend(chunk)
+            handle.seek(offset)
+            data = handle.read(size)
     except OSError as exc:
         raise AnalysisPackError(f"Unable to read {label}: {exc}") from exc
     if len(data) != size:
         raise AnalysisPackError(f"Unable to read complete {label}")
-    return bytes(data)
+    return data
+
+
+def _artifact_bytes(artifacts: Iterable[_Artifact]) -> int:
+    return sum(len(artifact.data) for artifact in artifacts)
 
 
 def _append(artifacts: list[_Artifact], path: str, data: bytes, *, max_bytes: int) -> None:
     logical = _safe_logical_path(path, label="pack artifact")
     if any(existing.path == logical for existing in artifacts):
         raise AnalysisPackError(f"Duplicate analysis-pack artifact: {logical}")
-    used = sum(len(existing.data) for existing in artifacts)
-    if used + len(data) > max_bytes:
+    if _artifact_bytes(artifacts) + len(data) > max_bytes:
         raise AnalysisPackError(
             f"Analysis-pack artifact {logical} exceeds the configured {max_bytes} byte budget"
         )
@@ -180,6 +235,25 @@ def _append_json(
     max_bytes: int,
 ) -> None:
     _append(artifacts, path, _canonical_json(value), max_bytes=max_bytes)
+
+
+def _append_optional_full_file(
+    artifacts: list[_Artifact],
+    artifact_path: str,
+    source_path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+) -> None:
+    try:
+        size = source_path.stat().st_size
+    except OSError as exc:
+        raise AnalysisPackError(f"Unable to stat {label}: {exc}") from exc
+    remaining = max_bytes - _artifact_bytes(artifacts)
+    if size > remaining:
+        return
+    data = _read_small_file(source_path, max_bytes=remaining, label=label)
+    _append(artifacts, artifact_path, data, max_bytes=max_bytes)
 
 
 def _project_root(analysis_root: Path, module_record: dict[str, object]) -> Path:
@@ -200,11 +274,6 @@ def _module_bytes_path(analysis_root: Path, module_record: dict[str, object]) ->
     if not path.is_file():
         raise AnalysisPackError("Selected module bytes are missing")
     return path
-
-
-def _verify_source_bytes(record: WorkspaceFileRecord, data: bytes) -> None:
-    if len(data) != record.size or hashlib.sha256(data).hexdigest() != record.sha256:
-        raise AnalysisPackError(f"Analysis bytes no longer match workspace provenance: {record.path}")
 
 
 def _module_artifacts(
@@ -241,9 +310,14 @@ def _module_artifacts(
         _append_json(artifacts, f"metadata/{name}", portable, max_bytes=max_bytes)
 
     module_path = _module_bytes_path(analysis_root, module)
-    module_bytes = _read_small_file(module_path, max_bytes=max_bytes, label="selected module")
-    _verify_source_bytes(source_record, module_bytes)
-    _append(artifacts, "evidence/module.bin", module_bytes, max_bytes=max_bytes)
+    _verify_source_file(source_record, module_path)
+    _append_optional_full_file(
+        artifacts,
+        "evidence/module.bin",
+        module_path,
+        max_bytes=max_bytes,
+        label="selected module",
+    )
     return artifacts
 
 
@@ -269,12 +343,12 @@ def _select_function(functions: object, selector: str) -> dict[str, object]:
     return matches[0]
 
 
-def _function_context(
+def _function_context_range(
     project: Path,
-    module_bytes: bytes,
+    module_size: int,
     function: dict[str, object],
     context_bytes: int,
-) -> tuple[bytes, int]:
+) -> tuple[int, int]:
     executable = _load_json(project / "metadata/executable.json", label="executable metadata")
     if not isinstance(executable, dict) or not isinstance(executable.get("sections"), list):
         raise AnalysisPackError("Executable metadata cannot map the selected function to file bytes")
@@ -298,11 +372,11 @@ def _function_context(
         raise AnalysisPackError("Selected function is not backed by a file section")
     offset = section["offset"] + (address - section["addr"])
     function_end = offset + size
-    if offset < 0 or function_end > len(module_bytes):
+    if offset < 0 or function_end > module_size:
         raise AnalysisPackError("Selected function byte range is outside the source module")
     start = max(0, offset - context_bytes)
-    end = min(len(module_bytes), function_end + context_bytes)
-    return module_bytes[start:end], start
+    end = min(module_size, function_end + context_bytes)
+    return start, end
 
 
 def _function_artifacts(
@@ -364,9 +438,19 @@ def _function_artifacts(
     _append_json(artifacts, "evidence/callgraph.json", call_edges, max_bytes=max_bytes)
 
     module_path = _module_bytes_path(analysis_root, module)
-    module_bytes = _read_small_file(module_path, max_bytes=max_bytes, label="selected module")
-    _verify_source_bytes(source_record, module_bytes)
-    context, context_offset = _function_context(project, module_bytes, selected, context_bytes)
+    _verify_source_file(source_record, module_path)
+    context_start, context_end = _function_context_range(
+        project,
+        source_record.size,
+        selected,
+        context_bytes,
+    )
+    context = _read_slice(
+        module_path,
+        context_start,
+        context_end - context_start,
+        label="function context",
+    )
     _append(artifacts, "evidence/context.bin", context, max_bytes=max_bytes)
     _append_json(
         artifacts,
@@ -374,7 +458,7 @@ def _function_artifacts(
         {
             "parent_path": source_record.path,
             "parent_sha256": source_record.sha256,
-            "file_offset": context_offset,
+            "file_offset": context_start,
             "size": len(context),
         },
         max_bytes=max_bytes,
@@ -398,10 +482,18 @@ def _resource_artifacts(
     resource_path = _safe_child(analysis_root, extracted_value)
     if not resource_path.is_file():
         raise AnalysisPackError("Selected resource bytes are missing")
-    resource_bytes = _read_small_file(resource_path, max_bytes=max_bytes, label="selected resource")
-    _verify_source_bytes(source_record, resource_bytes)
-    _append(artifacts, "evidence/resource-sample.bin", resource_bytes[:context_bytes], max_bytes=max_bytes)
-    _append(artifacts, "evidence/resource.bin", resource_bytes, max_bytes=max_bytes)
+    _verify_source_file(source_record, resource_path)
+
+    sample_size = min(context_bytes, source_record.size)
+    sample = _read_slice(resource_path, 0, sample_size, label="resource sample")
+    _append(artifacts, "evidence/resource-sample.bin", sample, max_bytes=max_bytes)
+    _append_optional_full_file(
+        artifacts,
+        "evidence/resource.bin",
+        resource_path,
+        max_bytes=max_bytes,
+        label="selected resource",
+    )
 
     for filename, key in (
         ("embedded_resources.json", "embedded"),
@@ -433,6 +525,54 @@ def _artifact_manifest(artifacts: Iterable[_Artifact]) -> list[dict[str, object]
         }
         for artifact in sorted(artifacts, key=lambda item: item.path)
     ]
+
+
+def _pack_manifest(
+    manifest: GameWorkspaceManifest,
+    source_record: WorkspaceFileRecord,
+    selector_kind: str,
+    selector_value: str,
+    artifacts: list[_Artifact],
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "source_identity": manifest.source_identity,
+        "selector": {"kind": selector_kind, "value": selector_value},
+        "source": {
+            "path": source_record.path,
+            "size": source_record.size,
+            "sha256": source_record.sha256,
+        },
+        "artifacts": _artifact_manifest(artifacts),
+    }
+
+
+def _fit_manifest_budget(
+    manifest: GameWorkspaceManifest,
+    source_record: WorkspaceFileRecord,
+    selector_kind: str,
+    selector_value: str,
+    artifacts: list[_Artifact],
+    max_bytes: int,
+) -> tuple[list[_Artifact], bytes]:
+    selected = list(artifacts)
+    while True:
+        manifest_bytes = _canonical_json(
+            _pack_manifest(manifest, source_record, selector_kind, selector_value, selected)
+        )
+        if _artifact_bytes(selected) + len(manifest_bytes) <= max_bytes:
+            return selected, manifest_bytes
+        optional_index = next(
+            (
+                index
+                for index in range(len(selected) - 1, -1, -1)
+                if selected[index].path in _OPTIONAL_FULL_ARTIFACTS
+            ),
+            None,
+        )
+        if optional_index is None:
+            raise AnalysisPackError("Analysis-pack manifest would exceed the configured budget")
+        del selected[optional_index]
 
 
 def _zip_info(path: str) -> zipfile.ZipInfo:
@@ -489,8 +629,6 @@ def create_analysis_pack(
         raise AnalysisPackError("Analysis-pack context size must be within the configured budget")
     if resource is not None and (module is not None or function is not None):
         raise AnalysisPackError("Resource packs cannot be combined with module/function selectors")
-    if function is not None and module is None:
-        raise AnalysisPackError("Function packs require --module to disambiguate the source module")
     if module is None and function is None and resource is None:
         raise AnalysisPackError("Select a module, function, or resource for the analysis pack")
 
@@ -511,9 +649,18 @@ def create_analysis_pack(
         selector_kind = "resource"
         selector_value = source_record.path
     else:
-        assert module is not None
-        source_record = _find_file(manifest, module)
-        normalized_module = _module_record(analysis_root, source_record.path)
+        if module is None:
+            if function is None:
+                raise AnalysisPackError("Select a module or function for the analysis pack")
+            normalized_module = _single_analyzed_module(analysis_root)
+            module_path = normalized_module.get("path")
+            if not isinstance(module_path, str):
+                raise AnalysisPackError("Analyzed module has no logical source path")
+            source_record = _find_file(manifest, module_path)
+        else:
+            source_record = _find_file(manifest, module)
+            normalized_module = _module_record(analysis_root, source_record.path)
+
         if function is None:
             artifacts = _module_artifacts(
                 analysis_root,
@@ -537,22 +684,15 @@ def create_analysis_pack(
             selected_name = selected_function.get("name")
             selector_value = str(selected_name if selected_name is not None else function)
 
-    pack_manifest = {
-        "schema_version": 1,
-        "source_identity": manifest.source_identity,
-        "selector": {"kind": selector_kind, "value": selector_value},
-        "source": {
-            "path": source_record.path,
-            "size": source_record.size,
-            "sha256": source_record.sha256,
-        },
-        "artifacts": _artifact_manifest(artifacts),
-    }
-    manifest_bytes = _canonical_json(pack_manifest)
-    total_bytes = sum(len(artifact.data) for artifact in artifacts)
-    if total_bytes + len(manifest_bytes) > max_bytes:
-        raise AnalysisPackError("Analysis-pack manifest would exceed the configured budget")
-
+    artifacts, manifest_bytes = _fit_manifest_budget(
+        manifest,
+        source_record,
+        selector_kind,
+        selector_value,
+        artifacts,
+        max_bytes,
+    )
+    total_bytes = _artifact_bytes(artifacts)
     output = Path(output_path)
     _write_pack(output, artifacts, manifest_bytes)
     return AnalysisPackResult(
