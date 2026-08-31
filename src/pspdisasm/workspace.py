@@ -7,13 +7,12 @@ import json
 from pathlib import Path, PurePosixPath
 import posixpath
 import shutil
-import tempfile
 from typing import BinaryIO, Iterable
 
 from .disc import GameDiscManifest, scan_game_disc
 from .disc_image import open_disc_stream
 from .errors import EngineUnavailableError, ParseError, WorkspaceError
-from .game_project import GameProjectResult, generate_game_project as _generate_game_project
+from .game_project import GameProjectResult, generate_game_project
 
 
 WORKSPACE_SCHEMA_VERSION = 1
@@ -404,78 +403,6 @@ def _analysis_key(manifest: GameWorkspaceManifest, nid_databases: Iterable[Path 
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-
-
-def _safe_iso_component(part: str) -> str:
-    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
-    upper = part.upper()
-    cleaned = "".join(char if char in allowed else "_" for char in upper)
-    return cleaned or "_"
-
-
-def _build_temporary_iso(source: Path, destination: Path) -> None:
-    pycdlib = _load_pycdlib()
-    iso = pycdlib.PyCdlib()
-    iso.new(interchange_level=3)
-    try:
-        directories = sorted(
-            [path for path in source.rglob("*") if path.is_dir() and not path.is_symlink()],
-            key=lambda path: (len(path.relative_to(source).parts), path.as_posix().casefold()),
-        )
-        physical_by_relative: dict[Path, str] = {}
-        for directory in directories:
-            relative = directory.relative_to(source)
-            iso_parts = [_safe_iso_component(part) for part in relative.parts]
-            iso_path = "/" + "/".join(iso_parts)
-            iso.add_directory(iso_path=iso_path)
-            physical_by_relative[relative] = iso_path
-
-        for path in sorted(source.rglob("*"), key=lambda item: item.as_posix().casefold()):
-            if path.is_symlink():
-                raise WorkspaceError(f"Symlinks are not allowed in extracted PSP sources: {path}")
-            if not path.is_file():
-                continue
-            relative = path.relative_to(source)
-            iso_parts = [_safe_iso_component(part) for part in relative.parts]
-            iso_path = "/" + "/".join(iso_parts) + ";1"
-            iso.add_file(str(path), iso_path=iso_path)
-        iso.write(str(destination))
-    except WorkspaceError:
-        raise
-    except Exception as exc:
-        raise WorkspaceError(f"Unable to stage extracted PSP directory for analysis: {exc}") from exc
-    finally:
-        try:
-            iso.close()
-        except Exception:
-            pass
-
-
-def generate_game_project(
-    source: Path | str,
-    output_dir: Path | str,
-    *,
-    nid_databases: Iterable[Path | str] = (),
-    container_parsers: Iterable[object] = (),
-) -> GameProjectResult:
-    source_path = Path(source)
-    if not source_path.is_dir():
-        return _generate_game_project(
-            source_path,
-            output_dir,
-            nid_databases=nid_databases,
-            container_parsers=container_parsers,
-        )
-
-    with tempfile.TemporaryDirectory(prefix="pspdisasm-workspace-") as temp_dir:
-        staged_iso = Path(temp_dir) / "extracted.iso"
-        _build_temporary_iso(source_path, staged_iso)
-        return _generate_game_project(
-            staged_iso,
-            output_dir,
-            nid_databases=nid_databases,
-            container_parsers=container_parsers,
-        )
 
 
 def _state_to_game_project(analysis_root: Path, payload: dict[str, object]) -> GameProjectResult:
