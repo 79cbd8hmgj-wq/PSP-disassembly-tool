@@ -110,6 +110,36 @@ def test_analyze_workspace_reuses_matching_analysis_key(tmp_path, monkeypatch):
     assert (workspace / "analysis/state.json").exists()
 
 
+def test_analyze_workspace_invalidates_cache_when_toolkit_version_changes(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    workspace = tmp_path / "workspace"
+    _build_extracted_game(source)
+
+    monkeypatch.setattr(workspace_module, "_toolkit_version", lambda: "1.0.0")
+    prepare_game_workspace(source, workspace)
+
+    calls = []
+    real_generate = workspace_module.generate_game_project
+
+    def record_generate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_generate(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_module, "generate_game_project", record_generate)
+
+    first = analyze_game_workspace(workspace)
+    second = analyze_game_workspace(workspace)
+    monkeypatch.setattr(workspace_module, "_toolkit_version", lambda: "2.0.0")
+    third = analyze_game_workspace(workspace)
+
+    assert first.reused is False
+    assert second.reused is True
+    assert third.reused is False
+    assert first.analysis_key == second.analysis_key
+    assert third.analysis_key != first.analysis_key
+    assert len(calls) == 2
+
+
 def test_analyze_workspace_rejects_unsupported_schema_without_writing_state(tmp_path):
     source = tmp_path / "source"
     workspace = tmp_path / "workspace"
