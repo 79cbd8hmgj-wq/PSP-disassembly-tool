@@ -18,6 +18,7 @@ _UMD_DATA = "UMD_DATA.BIN"
 _EBOOT = "PSP_GAME/SYSDIR/EBOOT.BIN"
 _BOOT = "PSP_GAME/SYSDIR/BOOT.BIN"
 _METADATA_NAMES = {_PARAM_SFO, _UMD_DATA, "PSP_GAME/ICON0.PNG", "PSP_GAME/PIC0.PNG", "PSP_GAME/PIC1.PNG"}
+_COPY_CHUNK_BYTES = 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -138,11 +139,12 @@ def _choose_boot(files: list[_IsoFile]) -> str | None:
 
 def _classification(item: _IsoFile, boot_path: str) -> str:
     logical = item.logical_path
-    if logical.casefold() == boot_path.casefold():
+    folded = logical.casefold()
+    if folded == boot_path.casefold():
         return "boot"
-    if logical in _METADATA_NAMES or logical.endswith("/PARAM.SFO"):
+    if folded in {name.casefold() for name in _METADATA_NAMES} or folded.endswith("/param.sfo"):
         return "metadata"
-    if logical.upper().endswith(".PRX") or _executable_kind(item.magic) != "unknown":
+    if folded.endswith(".prx") or _executable_kind(item.magic) != "unknown":
         return "module"
     return "resource"
 
@@ -169,11 +171,40 @@ def _safe_target(root: Path, logical_path: str) -> Path:
     return target
 
 
+def _safe_source_file(root: Path, logical_path: str) -> Path:
+    pure = PurePosixPath(logical_path)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ParseError(f"Unsafe extracted PSP path: {logical_path}")
+    root_resolved = root.resolve()
+    target = root_resolved / Path(*pure.parts)
+    for candidate in (target, *target.parents):
+        if candidate == root_resolved.parent:
+            break
+        if candidate.is_symlink():
+            raise ParseError(f"Symlink is not allowed in extracted PSP source: {candidate}")
+    resolved = target.resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        raise ParseError(f"Unsafe extracted PSP path: {logical_path}")
+    if not resolved.is_file():
+        raise ParseError(f"Extracted PSP file is missing: {logical_path}")
+    return resolved
+
+
 def _copy_iso_file(iso, physical_path: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with iso.open_file_from_iso(iso_path=physical_path) as source, destination.open("wb") as output:
         while True:
-            chunk = source.read(1024 * 1024)
+            chunk = source.read(_COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            output.write(chunk)
+
+
+def _copy_path_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("rb") as input_file, destination.open("wb") as output:
+        while True:
+            chunk = input_file.read(_COPY_CHUNK_BYTES)
             if not chunk:
                 break
             output.write(chunk)
@@ -207,7 +238,14 @@ def scan_game_disc(path: Path | str, output_dir: Path | str | None = None) -> Ga
 
                 physical_by_logical = {item.logical_path: item.physical_path for item in iso_files}
                 sfo: dict[str, object] = {}
-                sfo_physical = physical_by_logical.get(_PARAM_SFO)
+                sfo_physical = next(
+                    (
+                        item.physical_path
+                        for item in iso_files
+                        if item.logical_path.casefold() == _PARAM_SFO.casefold()
+                    ),
+                    None,
+                )
                 warnings: list[str] = []
                 if sfo_physical is not None:
                     try:
@@ -281,6 +319,109 @@ def scan_game_disc(path: Path | str, output_dir: Path | str | None = None) -> Ga
         raise
 
 
+def scan_game_directory(
+    path: Path | str,
+    output_dir: Path | str | None = None,
+) -> GameDiscManifest:
+    source = Path(path)
+    if source.is_symlink() or not source.is_dir():
+        raise ParseError(f"Extracted PSP source is not a regular directory: {source}")
+
+    source_root = source.resolve()
+    files: list[_IsoFile] = []
+    for candidate in sorted(source.rglob("*"), key=lambda item: item.as_posix().casefold()):
+        if candidate.is_symlink():
+            raise ParseError(f"Symlink is not allowed in extracted PSP source: {candidate}")
+        if not candidate.is_file():
+            continue
+        logical = candidate.relative_to(source).as_posix()
+        safe_source = _safe_source_file(source_root, logical)
+        with safe_source.open("rb") as handle:
+            magic = handle.read(4)
+        files.append(
+            _IsoFile(
+                physical_path=logical,
+                logical_path=logical,
+                size=safe_source.stat().st_size,
+                magic=magic,
+            )
+        )
+
+    if not files:
+        raise ParseError("Extracted PSP source contains no files")
+    boot_path = _choose_boot(files)
+    if boot_path is None:
+        raise ParseError("Extracted PSP source contains no usable EBOOT.BIN or BOOT.BIN executable")
+
+    sfo: dict[str, object] = {}
+    warnings: list[str] = []
+    sfo_record = next(
+        (item for item in files if item.logical_path.casefold() == _PARAM_SFO.casefold()),
+        None,
+    )
+    if sfo_record is not None:
+        try:
+            sfo_path = _safe_source_file(source_root, sfo_record.logical_path)
+            sfo = parse_param_sfo(sfo_path.read_bytes())
+        except ParseError as exc:
+            warnings.append(f"PARAM.SFO could not be parsed: {exc}")
+    else:
+        warnings.append("PSP_GAME/PARAM.SFO is missing")
+
+    output_root = Path(output_dir) if output_dir is not None else None
+    modules_root = output_root / "modules" if output_root is not None else None
+    file_records: list[DiscFileRecord] = []
+    module_records: list[GameModuleRecord] = []
+
+    for item in files:
+        classification = _classification(item, boot_path)
+        kind = _executable_kind(item.magic)
+        file_records.append(
+            DiscFileRecord(
+                path=item.logical_path,
+                size=item.size,
+                classification=classification,
+                executable_kind=kind,
+            )
+        )
+        if classification not in ("boot", "module"):
+            continue
+
+        output_path: str | None = None
+        if modules_root is not None:
+            source_file = _safe_source_file(source_root, item.logical_path)
+            target = _safe_target(modules_root, item.logical_path)
+            _copy_path_file(source_file, target)
+            output_path = str(target.relative_to(output_root.resolve()))
+        module_records.append(
+            GameModuleRecord(
+                path=item.logical_path,
+                size=item.size,
+                executable_kind=kind,
+                output_path=output_path,
+                is_boot=classification == "boot",
+            )
+        )
+
+    file_records.sort(key=lambda item: item.path.casefold())
+    module_records.sort(key=lambda item: item.path.casefold())
+    manifest = GameDiscManifest(
+        source_name=str(source),
+        image_format="directory",
+        title=_string_value(sfo.get("TITLE")),
+        disc_id=_string_value(sfo.get("DISC_ID")),
+        disc_version=_string_value(sfo.get("DISC_VERSION")),
+        psp_system_version=_string_value(sfo.get("PSP_SYSTEM_VER")),
+        boot_path=boot_path,
+        files=file_records,
+        modules=module_records,
+        warnings=warnings,
+    )
+    if output_root is not None:
+        _write_metadata(output_root, manifest, sfo)
+    return manifest
+
+
 def extract_disc_resources(
     path: Path | str,
     output_dir: Path | str,
@@ -339,6 +480,37 @@ def extract_disc_resources(
                     pass
     except (ParseError, EngineUnavailableError):
         raise
+
+
+def extract_directory_resources(
+    path: Path | str,
+    output_dir: Path | str,
+    *,
+    manifest: GameDiscManifest | None = None,
+) -> list[DiscResourceRecord]:
+    source = Path(path)
+    output_root = Path(output_dir)
+    selected_manifest = manifest if manifest is not None else scan_game_directory(source)
+    resource_files = sorted(
+        [record for record in selected_manifest.files if record.classification == "resource"],
+        key=lambda item: item.path.casefold(),
+    )
+    resources_root = output_root / "resources" / "files"
+    results: list[DiscResourceRecord] = []
+    source_root = source.resolve()
+
+    for record in resource_files:
+        source_file = _safe_source_file(source_root, record.path)
+        target = _safe_target(resources_root, record.path)
+        _copy_path_file(source_file, target)
+        results.append(
+            DiscResourceRecord(
+                path=record.path,
+                size=record.size,
+                output_path=str(target.relative_to(output_root.resolve())),
+            )
+        )
+    return results
 
 
 def _string_value(value: object) -> str | None:
