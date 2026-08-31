@@ -64,6 +64,31 @@ def _load_json(path: Path, *, label: str) -> object:
         raise AnalysisPackError(f"Unable to read {label}: {exc}") from exc
 
 
+def _portableize(value: object, *, logical_source: str, workspace_root: Path) -> object:
+    """Remove machine-local paths from JSON evidence before it enters a pack."""
+    if isinstance(value, list):
+        return [
+            _portableize(item, logical_source=logical_source, workspace_root=workspace_root)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        output: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "source_name" and isinstance(item, str):
+                output[key] = logical_source
+            else:
+                output[key] = _portableize(
+                    item,
+                    logical_source=logical_source,
+                    workspace_root=workspace_root,
+                )
+        return output
+    if isinstance(value, str):
+        root = str(workspace_root.resolve())
+        return value.replace(root, "<workspace>") if root in value else value
+    return value
+
+
 def _find_file(manifest: GameWorkspaceManifest, logical_path: str) -> WorkspaceFileRecord:
     selected = _safe_logical_path(logical_path)
     matches = [record for record in manifest.files if record.path.casefold() == selected.casefold()]
@@ -184,6 +209,7 @@ def _verify_source_bytes(record: WorkspaceFileRecord, data: bytes) -> None:
 
 def _module_artifacts(
     analysis_root: Path,
+    workspace_root: Path,
     source_record: WorkspaceFileRecord,
     module: dict[str, object],
     *,
@@ -205,9 +231,14 @@ def _module_artifacts(
     )
     for name in metadata_names:
         path = project / "metadata" / name
-        if path.is_file():
-            data = _read_small_file(path, max_bytes=max_bytes, label=f"module metadata {name}")
-            _append(artifacts, f"metadata/{name}", data, max_bytes=max_bytes)
+        if not path.is_file():
+            continue
+        portable = _portableize(
+            _load_json(path, label=f"module metadata {name}"),
+            logical_source=source_record.path,
+            workspace_root=workspace_root,
+        )
+        _append_json(artifacts, f"metadata/{name}", portable, max_bytes=max_bytes)
 
     module_path = _module_bytes_path(analysis_root, module)
     module_bytes = _read_small_file(module_path, max_bytes=max_bytes, label="selected module")
@@ -337,13 +368,17 @@ def _function_artifacts(
     _verify_source_bytes(source_record, module_bytes)
     context, context_offset = _function_context(project, module_bytes, selected, context_bytes)
     _append(artifacts, "evidence/context.bin", context, max_bytes=max_bytes)
-    context_meta = {
-        "parent_path": source_record.path,
-        "parent_sha256": source_record.sha256,
-        "file_offset": context_offset,
-        "size": len(context),
-    }
-    _append_json(artifacts, "evidence/context.json", context_meta, max_bytes=max_bytes)
+    _append_json(
+        artifacts,
+        "evidence/context.json",
+        {
+            "parent_path": source_record.path,
+            "parent_sha256": source_record.sha256,
+            "file_offset": context_offset,
+            "size": len(context),
+        },
+        max_bytes=max_bytes,
+    )
     return artifacts, selected
 
 
@@ -365,8 +400,7 @@ def _resource_artifacts(
         raise AnalysisPackError("Selected resource bytes are missing")
     resource_bytes = _read_small_file(resource_path, max_bytes=max_bytes, label="selected resource")
     _verify_source_bytes(source_record, resource_bytes)
-    sample = resource_bytes[:context_bytes]
-    _append(artifacts, "evidence/resource-sample.bin", sample, max_bytes=max_bytes)
+    _append(artifacts, "evidence/resource-sample.bin", resource_bytes[:context_bytes], max_bytes=max_bytes)
     _append(artifacts, "evidence/resource.bin", resource_bytes, max_bytes=max_bytes)
 
     for filename, key in (
@@ -473,6 +507,7 @@ def create_analysis_pack(
         if function is None:
             artifacts = _module_artifacts(
                 analysis_root,
+                workspace,
                 source_record,
                 normalized_module,
                 max_bytes=max_bytes,
@@ -492,7 +527,6 @@ def create_analysis_pack(
             selected_name = selected_function.get("name")
             selector_value = str(selected_name if selected_name is not None else function)
 
-    artifact_records = _artifact_manifest(artifacts)
     pack_manifest = {
         "schema_version": 1,
         "source_identity": manifest.source_identity,
@@ -502,10 +536,11 @@ def create_analysis_pack(
             "size": source_record.size,
             "sha256": source_record.sha256,
         },
-        "artifacts": artifact_records,
+        "artifacts": _artifact_manifest(artifacts),
     }
     manifest_bytes = _canonical_json(pack_manifest)
-    if sum(len(artifact.data) for artifact in artifacts) + len(manifest_bytes) > max_bytes:
+    total_bytes = sum(len(artifact.data) for artifact in artifacts)
+    if total_bytes + len(manifest_bytes) > max_bytes:
         raise AnalysisPackError("Analysis-pack manifest would exceed the configured budget")
 
     output = Path(output_path)
@@ -515,6 +550,6 @@ def create_analysis_pack(
         selector_kind=selector_kind,
         selector_value=selector_value,
         artifact_count=len(artifacts),
-        total_bytes=sum(len(artifact.data) for artifact in artifacts),
+        total_bytes=total_bytes,
         manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
     )
