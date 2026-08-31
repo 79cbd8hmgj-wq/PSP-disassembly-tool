@@ -443,8 +443,18 @@ def _zip_info(path: str) -> zipfile.ZipInfo:
     return info
 
 
+def _reject_symlinked_output(output: Path) -> None:
+    for candidate in (output, *output.parents):
+        if candidate.is_symlink():
+            raise AnalysisPackError(
+                f"Analysis-pack output path contains a symlink component: {candidate}"
+            )
+
+
 def _write_pack(output: Path, artifacts: list[_Artifact], manifest_bytes: bytes) -> None:
+    _reject_symlinked_output(output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    _reject_symlinked_output(output)
     if output.exists() and output.is_dir():
         raise AnalysisPackError(f"Analysis-pack output is a directory: {output}")
     temp = output.with_name(f".{output.name}.tmp")
