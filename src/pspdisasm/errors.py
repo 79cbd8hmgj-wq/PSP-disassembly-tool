@@ -24,3 +24,7 @@ class MatcherUnavailableError(RuntimeError):
 
 class MatchingError(RuntimeError):
     """Raised when original-vs-recompiled matching cannot be completed safely."""
+
+
+class WorkspaceError(RuntimeError):
+    """Raised when a local PSP workspace cannot be prepared or used safely."""
