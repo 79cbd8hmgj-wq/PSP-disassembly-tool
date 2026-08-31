@@ -8,11 +8,17 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .analysis_pack import (
+    DEFAULT_CONTEXT_BYTES,
+    DEFAULT_PACK_MAX_BYTES,
+    create_analysis_pack,
+)
 from .analyzer import analyze_file, model_to_dict
 from .disc import scan_game_disc
 from .disassembler import disassemble_file, result_to_dict
 from .decompiler import DEFAULT_M2C_TARGET, decompile_project_function
 from .errors import (
+    AnalysisPackError,
     DecompilationError,
     DecompilerUnavailableError,
     DisassemblyError,
@@ -20,13 +26,14 @@ from .errors import (
     MatcherUnavailableError,
     MatchingError,
     ParseError,
+    WorkspaceError,
 )
-from .game_project import generate_game_project
 from .linker import ModuleAnalysisInput, link_modules
 from .matcher import match_project_function
 from .model import DisassemblyResult, ExecutableModel, ModuleLinkAnalysis
 from .nids import load_nid_databases
 from .project import generate_project
+from .workspace import analyze_game_workspace, generate_game_project, prepare_game_workspace
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -50,6 +57,51 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="FILE",
         help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
+    )
+
+    prepare_game = sub.add_parser(
+        "prepare-game",
+        help="Prepare a deterministic local workspace for a PSP ISO/CSO or extracted directory",
+    )
+    prepare_game.add_argument("input", type=Path)
+    prepare_game.add_argument("workspace", type=Path)
+
+    analyze_workspace = sub.add_parser(
+        "analyze-workspace",
+        help="Analyze or resume a prepared local PSP workspace",
+    )
+    analyze_workspace.add_argument("workspace", type=Path)
+    analyze_workspace.add_argument(
+        "--nid-db",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
+    )
+
+    make_pack = sub.add_parser(
+        "make-pack",
+        help="Create a bounded portable analysis pack from a prepared/analyzed workspace",
+    )
+    make_pack.add_argument("workspace", type=Path)
+    make_pack.add_argument("--output", type=Path, required=True, metavar="PATH")
+    make_pack.add_argument("--module", metavar="LOGICAL_PATH")
+    make_pack.add_argument("--function", metavar="NAME_OR_ADDRESS")
+    make_pack.add_argument("--resource", metavar="LOGICAL_PATH")
+    make_pack.add_argument(
+        "--max-bytes",
+        type=int,
+        default=DEFAULT_PACK_MAX_BYTES,
+        metavar="N",
+        help=f"Maximum uncompressed evidence bytes (default: {DEFAULT_PACK_MAX_BYTES})",
+    )
+    make_pack.add_argument(
+        "--context-bytes",
+        type=int,
+        default=DEFAULT_CONTEXT_BYTES,
+        metavar="N",
+        help=f"Function/resource context bytes (default: {DEFAULT_CONTEXT_BYTES})",
     )
 
     analyze = sub.add_parser("analyze", help="Analyze PSP ELF/PRX/~PSP metadata")
@@ -263,6 +315,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Container analysis: {result.containers_path}")
             return 0
 
+        if args.command == "prepare-game":
+            manifest = prepare_game_workspace(args.input, args.workspace)
+            print(f"Workspace: {args.workspace}")
+            print(f"Source kind: {manifest.source_kind}")
+            print(f"Files: {len(manifest.files)}")
+            print(f"Source identity: {manifest.source_identity}")
+            return 0
+
+        if args.command == "analyze-workspace":
+            result = analyze_game_workspace(args.workspace, nid_databases=args.nid_db)
+            game = result.game_project
+            print(f"Workspace: {args.workspace}")
+            print(f"Reused: {'yes' if result.reused else 'no'}")
+            print(f"Analysis key: {result.analysis_key}")
+            print(f"Executable candidates: {game.module_count}")
+            print(f"Analyzed modules: {game.analyzed_count}")
+            print(f"Needs decryption: {game.needs_decryption_count}")
+            print(f"Failed modules: {game.failed_count}")
+            print(f"Resources: {game.resource_count}")
+            print(f"Known resources: {game.known_resource_count}")
+            print(f"Unknown resources: {game.unknown_resource_count}")
+            return 0
+
+        if args.command == "make-pack":
+            result = create_analysis_pack(
+                args.workspace,
+                args.output,
+                module=args.module,
+                function=args.function,
+                resource=args.resource,
+                max_bytes=args.max_bytes,
+                context_bytes=args.context_bytes,
+            )
+            print(f"Pack: {result.output_path}")
+            print(f"Selector: {result.selector_kind} {result.selector_value}")
+            print(f"Artifacts: {result.artifact_count}")
+            print(f"Total bytes: {result.total_bytes}")
+            print(f"Manifest SHA-256: {result.manifest_sha256}")
+            return 0
+
         if args.command == "analyze":
             model = analyze_file(args.input)
             if not _write_json(model_to_dict(model), args.json):
@@ -373,6 +465,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         OSError,
         ValueError,
         ParseError,
+        WorkspaceError,
+        AnalysisPackError,
         EngineUnavailableError,
         DisassemblyError,
         DecompilerUnavailableError,
