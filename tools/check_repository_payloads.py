@@ -33,7 +33,10 @@ _OPAQUE_BINARY_SUFFIXES = {
 
 
 def _normalize(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def _is_small_test_fixture(path: str, size: int) -> bool:
