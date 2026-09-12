@@ -26,6 +26,8 @@ from .errors import (
     MatcherUnavailableError,
     MatchingError,
     ParseError,
+    RecoveryBackendUnavailableError,
+    RecoveryError,
     WorkspaceError,
 )
 from .linker import ModuleAnalysisInput, link_modules
@@ -33,7 +35,55 @@ from .matcher import match_project_function
 from .model import DisassemblyResult, ExecutableModel, ModuleLinkAnalysis
 from .nids import load_nid_databases
 from .project import generate_project
+from .recovery import (
+    DEFAULT_MAX_RECOVERED_BYTES,
+    ExternalDecryptorBackend,
+    PrebuiltDumpBackend,
+    RecoveryBackend,
+    recover_bytes,
+)
 from .workspace import analyze_game_workspace, generate_game_project, prepare_game_workspace
+
+
+def _add_recovery_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--recovery-backend",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "External PSP recovery backend executable/script (invoked as "
+            "'--input IN --output OUT'); may be repeated"
+        ),
+    )
+    parser.add_argument(
+        "--recovery-manifest",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FILE",
+        help=(
+            "Prebuilt-dump recovery manifest JSON binding original/recovered SHA-256 pairs "
+            "to recovered files; may be repeated"
+        ),
+    )
+    parser.add_argument(
+        "--recovery-max-bytes",
+        type=int,
+        default=DEFAULT_MAX_RECOVERED_BYTES,
+        metavar="N",
+        help=f"Maximum recovered-output bytes (default: {DEFAULT_MAX_RECOVERED_BYTES})",
+    )
+
+
+def _build_recovery_backends(args: argparse.Namespace) -> list[RecoveryBackend]:
+    backends: list[RecoveryBackend] = []
+    for path in args.recovery_backend:
+        backends.append(ExternalDecryptorBackend(path, max_output_bytes=args.recovery_max_bytes))
+    for manifest in args.recovery_manifest:
+        backends.append(PrebuiltDumpBackend(manifest, max_output_bytes=args.recovery_max_bytes))
+    return backends
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -58,6 +108,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
     )
+    _add_recovery_arguments(game_project)
 
     prepare_game = sub.add_parser(
         "prepare-game",
@@ -79,6 +130,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
     )
+    _add_recovery_arguments(analyze_workspace)
 
     make_pack = sub.add_parser(
         "make-pack",
@@ -148,6 +200,15 @@ def _parser() -> argparse.ArgumentParser:
         help="NID JSON or PSPLibDoc-style CSV database; may be repeated and later files win",
     )
     link.add_argument("--json", metavar="PATH", help="Write module-link JSON; use '-' for stdout")
+
+    recover = sub.add_parser(
+        "recover",
+        help="Attempt to recover one encrypted ~PSP container into an analyzable ELF/PRX",
+    )
+    recover.add_argument("input", type=Path)
+    recover.add_argument("output", type=Path)
+    _add_recovery_arguments(recover)
+    recover.add_argument("--json", metavar="PATH", help="Write recovery provenance JSON; use '-' for stdout")
 
     decompile = sub.add_parser("decompile", help="Generate an assisted C draft for one project function using m2c")
     decompile.add_argument("project", type=Path)
@@ -291,13 +352,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "game-project":
-            result = generate_game_project(args.input, args.output, nid_databases=args.nid_db)
+            result = generate_game_project(
+                args.input,
+                args.output,
+                nid_databases=args.nid_db,
+                recovery_backends=_build_recovery_backends(args),
+                recovery_max_output_bytes=args.recovery_max_bytes,
+            )
             analysis = json.loads(result.analysis_path.read_text(encoding="utf-8"))
             print(f"Game: {analysis.get('title') or '<unknown>'}")
             if analysis.get("disc_id"):
                 print(f"Disc ID: {analysis['disc_id']}")
             print(f"Executable candidates: {result.module_count}")
             print(f"Analyzed modules: {result.analyzed_count}")
+            print(f"Recovered modules: {result.recovered_count}")
             print(f"Needs decryption: {result.needs_decryption_count}")
             print(f"Failed modules: {result.failed_count}")
             print(f"Cross-module links: {len(analysis.get('links', {}).get('links', []))}")
@@ -324,13 +392,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "analyze-workspace":
-            result = analyze_game_workspace(args.workspace, nid_databases=args.nid_db)
+            result = analyze_game_workspace(
+                args.workspace,
+                nid_databases=args.nid_db,
+                recovery_backends=_build_recovery_backends(args),
+                recovery_max_output_bytes=args.recovery_max_bytes,
+            )
             game = result.game_project
             print(f"Workspace: {args.workspace}")
             print(f"Reused: {'yes' if result.reused else 'no'}")
             print(f"Analysis key: {result.analysis_key}")
             print(f"Executable candidates: {game.module_count}")
             print(f"Analyzed modules: {game.analyzed_count}")
+            print(f"Recovered modules: {game.recovered_count}")
             print(f"Needs decryption: {game.needs_decryption_count}")
             print(f"Failed modules: {game.failed_count}")
             print(f"Resources: {game.resource_count}")
@@ -392,6 +466,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = link_modules(units, database)
             if not _write_json(asdict(result), args.json):
                 print(_link_summary(result))
+            return 0
+
+        if args.command == "recover":
+            backends = _build_recovery_backends(args)
+            data = args.input.read_bytes()
+            result = recover_bytes(data, backends=backends, max_output_bytes=args.recovery_max_bytes)
+            args.output.write_bytes(result.data)
+            if not _write_json(asdict(result.provenance), args.json):
+                print(f"Recovered: {args.input} -> {args.output}")
+                print(f"Backend: {result.provenance.recovery_backend}")
+                if result.provenance.backend_version:
+                    print(f"Backend version: {result.provenance.backend_version}")
+                print(f"Original SHA-256: {result.provenance.original_sha256}")
+                print(f"Recovered SHA-256: {result.provenance.recovered_sha256}")
+                print(f"Verification: {result.provenance.verification}")
+                for warning in result.provenance.warnings:
+                    print(f"Warning: {warning}")
             return 0
 
         if args.command == "decompile":
@@ -469,6 +560,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         AnalysisPackError,
         EngineUnavailableError,
         DisassemblyError,
+        RecoveryBackendUnavailableError,
+        RecoveryError,
         DecompilerUnavailableError,
         DecompilationError,
         MatcherUnavailableError,

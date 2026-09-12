@@ -2,7 +2,7 @@
 
 `pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, matching, and whole-game resource-analysis toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of combining upstream projects into one fork.
 
-## Current status: Phase 8A
+## Current status: Phase 8B
 
 The implemented pipeline now covers:
 
@@ -20,6 +20,7 @@ The implemented pipeline now covers:
 12. Explicit caller-addressed relocated load views for single decrypted ELF/PRX disassembly and Splat project generation.
 13. Evidence-backed whole-game module placement with fixed `ET_EXEC`, inferred boot placement, and explicitly analysis-only secondary PRX addresses.
 14. Local large-game workspaces with deterministic manifests, resumable whole-game analysis, bounded portable analysis packs, and tracked-content payload guards.
+15. An optional, pluggable retail-executable recovery layer: user-supplied external tools or pre-verified dumps can turn an encrypted `~PSP` container into a directly analyzable ELF/PRX, with strict verification and full hash provenance, before it re-enters the same analysis pipeline. No recovery/decryption capability is implemented in this repository.
 
 ## Implemented phases
 
@@ -200,6 +201,19 @@ See [`docs/phase7g-runtime-placement.md`](docs/phase7g-runtime-placement.md) for
 
 See [`docs/phase8a-large-game-workspaces.md`](docs/phase8a-large-game-workspaces.md) for workspace layout, resume semantics, analysis-pack schemas, size limits, and repository payload policy.
 
+### Phase 8B — retail executable recovery
+
+- Define a `RecoveryBackend` protocol (`probe`/`recover`) so recovery can come from an external subprocess tool, a pre-verified decrypted-dump manifest, or a future backend, without the MIT core ever containing PSP decryption logic itself.
+- `ExternalDecryptorBackend` invokes a user-supplied tool out-of-process (`--input`/`--output`, no shell), with bounded diagnostic capture, bounded output reads that check size before a full read, and best-effort backend-version detection that never blocks success.
+- `PrebuiltDumpBackend` verifies a JSON manifest binding `original_sha256` → `recovered_sha256` → `path`, rejecting path traversal, absolute paths, and symlinked recovered files.
+- Recovery is single-stage only: if a backend's output is itself still an encrypted `~PSP` container, that is a verification failure, not a retry signal.
+- Every recovery attempt (success or failure) is classified into one of eight machine-readable outcomes (`RecoveryOutcome`) carried on a `RecoveryProvenance` record with original/recovered SHA-256, backend identity/version, and warnings — never only a warning string.
+- `generate_game_project()`/`analyze_game_workspace()` accept `recovery_backends=` (default empty, so default behavior is unchanged) and record a distinguishable `analyzed_recovered` module status plus a deterministic `GameProjectResult.recovered_count`, alongside the existing `needs_decryption_count` a recovered module no longer counts toward.
+- A recovery failure is isolated to its own module exactly like any other secondary-module failure; the rest of the game is analyzed normally.
+- Workspace resumable-analysis cache identity folds in the configured recovery backend(s)' identity and the output-size bound, so switching backends invalidates stale cached results.
+
+See [`docs/phase8b-retail-recovery.md`](docs/phase8b-retail-recovery.md) for the full data model, verification contract, failure taxonomy, and licensing boundary.
+
 ## Installation
 
 Core parsing:
@@ -251,9 +265,10 @@ pspdisasm game game.cso game_intake
 ```bash
 pspdisasm game-project game.iso game_decomp
 pspdisasm game-project game.cso game_decomp --nid-db psp_nids.csv
+pspdisasm game-project game.iso game_decomp --recovery-backend /path/to/psp-recover-tool
 ```
 
-`game-project` automatically runs Phase 7A–7G behavior applicable to whole-game analysis. Phase 7E relocation decoding is consumed by PRX analysis; Phase 7G then chooses an evidence-backed fixed or boot placement when the executable itself supports that claim, or an explicitly analysis-only deterministic placement for secondary relocatable PRXs. The selected address is passed through the Phase 7F load-view path before disassembly/Splat/linking. Encrypted `~PSP` modules remain `needs_decryption`, and trusted title-specific container parsers can additionally be supplied through the Python API.
+`game-project` automatically runs Phase 7A–7G behavior applicable to whole-game analysis. Phase 7E relocation decoding is consumed by PRX analysis; Phase 7G then chooses an evidence-backed fixed or boot placement when the executable itself supports that claim, or an explicitly analysis-only deterministic placement for secondary relocatable PRXs. The selected address is passed through the Phase 7F load-view path before disassembly/Splat/linking. Encrypted `~PSP` modules remain `needs_decryption` unless a Phase 8B `--recovery-backend`/`--recovery-manifest` is configured and successfully recovers them (then `analyzed_recovered`), and trusted title-specific container parsers can additionally be supplied through the Python API.
 
 Typical output:
 
@@ -276,6 +291,8 @@ game_decomp/
 │   └── container_entries.csv
 ├── modules/
 │   └── PSP_GAME/... executable candidates ...
+├── recovered/
+│   └── PSP_GAME/... Phase 8B recovered ELF/PRX bytes + <path>.recovery.json ...
 ├── projects/
 │   └── PSP_GAME/... per-module Splat workspaces ...
 └── resources/
@@ -287,6 +304,8 @@ game_decomp/
         └── PSP_GAME/.../<container>/<inner-path>
 ```
 
+`recovered/` is only populated when a `--recovery-backend`/`--recovery-manifest` is configured and successfully recovers at least one module; it never contains original encrypted bytes.
+
 The CLI summary reports executable/module counts plus:
 
 - total resource files;
@@ -295,7 +314,8 @@ The CLI summary reports executable/module counts plus:
 - embedded resources discovered;
 - unknown container candidates;
 - containers inspected by supplied parsers;
-- accepted/extracted container entries.
+- accepted/extracted container entries;
+- Phase 8B recovered modules (`recovered_count`), distinct from natively-analyzed modules.
 
 ### Large-game local workspace
 
@@ -384,6 +404,20 @@ pspdisasm link game.prx service.prx utility.prx \
 
 NID databases are optional for `link`; exact cross-module relationships can still be discovered without them.
 
+### Recover an encrypted module
+
+```bash
+pspdisasm recover LOCKED.PRX recovered.elf --recovery-backend /path/to/psp-recover-tool
+```
+
+or from a pre-verified decrypted-dump manifest:
+
+```bash
+pspdisasm recover LOCKED.PRX recovered.elf --recovery-manifest dumps.json
+```
+
+`--recovery-backend` invokes an external tool as `<command> --input IN --output OUT` (no shell). `--recovery-manifest` points at a JSON list of `{"original_sha256", "recovered_sha256", "path"}` entries binding an already-decrypted dump to its encrypted source by hash, with no decryption performed by the toolkit itself. Either flag may be repeated; `--recovery-max-bytes` bounds the recovered output size (default 64 MiB). Recovery never recurses: a backend that returns another encrypted `~PSP` container is a verification failure, not a retry. `pspdisasm` implements neither backend's cryptography — see [`docs/phase8b-retail-recovery.md`](docs/phase8b-retail-recovery.md) for the full contract and licensing boundary.
+
 ### Generate an assisted C draft
 
 ```bash
@@ -465,11 +499,18 @@ from pspdisasm import (
     ContainerEntry,
     ContainerFamily,
     ContainerInspection,
+    DEFAULT_MAX_RECOVERED_BYTES,
+    ExternalDecryptorBackend,
     GameWorkspaceManifest,
     ModuleAnalysisInput,
     ModulePlacement,
     ModulePlacementInput,
     NidDatabase,
+    PrebuiltDumpBackend,
+    RecoveredPayload,
+    RecoveryBackend,
+    RecoveryOutcome,
+    RecoveryResult,
     RelocatedLoadView,
     ResourceContainerParser,
     WorkspaceAnalysisResult,
@@ -498,12 +539,14 @@ from pspdisasm import (
     plan_module_placements,
     prepare_game_workspace,
     profile_container_candidate,
+    recover_bytes,
     scan_game_disc,
     select_container_parser,
+    select_recovery_backend,
 )
 ```
 
-`generate_game_project()` is the high-level direct whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values. `decode_prxreloc2()` and `apply_psp_relocation_word()` expose the Phase 7E compressed-relocation decoder and pure word transform. `build_relocated_load_view()` returns a Phase 7F `RelocatedLoadView` at an explicit caller-provided runtime address. Phase 7G exposes `ModulePlacement`, `ModulePlacementInput`, and `plan_module_placements()`; `generate_game_project()` consumes the planner automatically and records whether each chosen address is a runtime-backed claim or analysis-only placement. Phase 8A exposes `GameWorkspaceManifest`, `WorkspaceFileRecord`, `WorkspaceAnalysisResult`, `prepare_game_workspace()`, `load_game_workspace()`, `analyze_game_workspace()`, `AnalysisPackResult`, and `create_analysis_pack()` for local large-game workflows and selective portable evidence.
+`generate_game_project()` is the high-level direct whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values. `decode_prxreloc2()` and `apply_psp_relocation_word()` expose the Phase 7E compressed-relocation decoder and pure word transform. `build_relocated_load_view()` returns a Phase 7F `RelocatedLoadView` at an explicit caller-provided runtime address. Phase 7G exposes `ModulePlacement`, `ModulePlacementInput`, and `plan_module_placements()`; `generate_game_project()` consumes the planner automatically and records whether each chosen address is a runtime-backed claim or analysis-only placement. Phase 8A exposes `GameWorkspaceManifest`, `WorkspaceFileRecord`, `WorkspaceAnalysisResult`, `prepare_game_workspace()`, `load_game_workspace()`, `analyze_game_workspace()`, `AnalysisPackResult`, and `create_analysis_pack()` for local large-game workflows and selective portable evidence. Phase 8B exposes the `RecoveryBackend` protocol, `ExternalDecryptorBackend`, `PrebuiltDumpBackend`, `recover_bytes()`, `select_recovery_backend()`, and the `RecoveredPayload`/`RecoveryResult`/`RecoveryOutcome` result types; `generate_game_project()`/`analyze_game_workspace()` accept `recovery_backends=` to opt in.
 
 ## Resource-analysis safety model
 
@@ -531,11 +574,12 @@ A signature or extension alone does not authorize arbitrary carving.
 - **maxcso** — CISO/CSO behavior/reference source for the clean-room reader.
 - **PPSSPP** — PSP disc/media/container/relocation/loading behavioral reference; GPL code is not copied into the core.
 - **PSPLibDoc-compatible data** — optional external NID naming input; no NID database is bundled.
+- **User-supplied recovery tooling** — Phase 8B's `ExternalDecryptorBackend`/`PrebuiltDumpBackend` invoke or verify a user-supplied, out-of-process recovery tool or pre-verified dump (which may itself be GPL-licensed or wrap PPSSPP/KIRK-compatible tooling the user is licensed to use); the toolkit implements no PSP cryptography and never links against or bundles such a tool.
 
 ## Current limitations
 
-- No PSP cryptographic decryption.
-- No GZIP/KL4E/2RLZ decompression of encrypted `~PSP` bodies.
+- No PSP cryptographic decryption or decompression is implemented in this repository. Phase 8B adds only a recovery *orchestration* layer (backend protocol, subprocess/manifest backends, verification, provenance); actual decryption capability must be supplied externally by the user.
+- Phase 8B recovery is single-stage: a backend whose output is itself still an encrypted `~PSP` container is treated as a verification failure, not retried or recursed into.
 - Secondary relocatable PRX placements in `game-project` are deterministic analysis addresses, not claimed runtime addresses; exact dynamic module placement still requires runtime evidence or an explicit single-module Phase 7F address.
 - Phase 7F applies proven relocation records only; it does not guess or rewrite unrelocated constants merely because they resemble PSP addresses.
 - Ambiguous `PT_PRXRELOC2` HI16 reuse state remains unresolved unless the caller supplies an explicit low half.
@@ -550,7 +594,7 @@ A signature or extension alone does not authorize arbitrary carving.
 - Synthesized Phase 5 reference objects do not yet reproduce original relocation tables.
 - No automatic PSP compiler/version identification yet.
 - Phase 6C infers conservative structural candidates; it does not claim exact C struct/header recovery.
-- Phase 8A does not upload, remotely host, decrypt, or recover retail game data; the original game remains required locally when analysis needs bytes outside a selected pack.
+- Phase 8A does not upload or remotely host retail game data; the original game remains required locally when analysis needs bytes outside a selected pack. Phase 8B lets a user-supplied backend recover an encrypted module locally, but the toolkit itself still performs no decryption.
 
 ## Development
 

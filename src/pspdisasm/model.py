@@ -223,6 +223,17 @@ class PrxAnalysis:
 
 
 @dataclass(slots=True)
+class RecoveryProvenance:
+    outcome: str
+    original_sha256: str | None = None
+    recovered_sha256: str | None = None
+    recovery_backend: str | None = None
+    backend_version: str | None = None
+    verification: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ExecutableModel:
     source_name: str
     input_kind: str
@@ -238,6 +249,7 @@ class ExecutableModel:
     exports: list[LibraryExport] = field(default_factory=list)
     relocations: list[Relocation] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    recovery: RecoveryProvenance | None = None
 
 
 @dataclass(slots=True)

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass, field
+
+from pspdisasm.model import PspContainerHeader
+from pspdisasm.recovery import RecoveredPayload
 
 
 def build_simple_elf32(*, e_type: int = 2, machine: int = 8) -> bytes:
@@ -262,3 +266,29 @@ def build_allegrex_elf32() -> bytes:
         struct.pack_into("<10I", blob, shoff + i * 0x28, *section)
 
     return bytes(blob)
+
+
+@dataclass
+class FakeRecoveryBackend:
+    """A synthetic, in-memory RecoveryBackend for tests.
+
+    Never performs real decryption; it just hands back whatever bytes the
+    test configured, so game-wide orchestration and CLI plumbing can be
+    exercised without any cryptographic implementation in the toolkit.
+    """
+
+    name: str = "fake"
+    payload: bytes = field(default_factory=build_allegrex_elf32)
+    accept: bool = True
+    error: Exception | None = None
+    version: str | None = "1.0-fake"
+
+    def probe(self, header: PspContainerHeader, data: bytes) -> float:
+        del header, data
+        return 1.0 if self.accept else 0.0
+
+    def recover(self, data: bytes) -> RecoveredPayload:
+        del data
+        if self.error is not None:
+            raise self.error
+        return RecoveredPayload(data=self.payload, backend_version=self.version)
