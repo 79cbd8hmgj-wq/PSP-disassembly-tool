@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import asdict
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Sequence
 
@@ -28,11 +30,17 @@ from .errors import (
     ParseError,
     RecoveryBackendUnavailableError,
     RecoveryError,
+    RuntimeBackendUnavailableError,
+    RuntimeCaptureError,
+    RuntimeConnectionError,
+    RuntimeMappingError,
+    RuntimeProtocolError,
+    RuntimeTimeoutError,
     WorkspaceError,
 )
 from .linker import ModuleAnalysisInput, link_modules
 from .matcher import match_project_function
-from .model import DisassemblyResult, ExecutableModel, ModuleLinkAnalysis
+from .model import DisassemblyResult, ExecutableModel, ModuleLinkAnalysis, RuntimeAddress, RuntimeAddressDomain
 from .nids import load_nid_databases
 from .project import generate_project
 from .recovery import (
@@ -42,7 +50,19 @@ from .recovery import (
     RecoveryBackend,
     recover_bytes,
 )
-from .workspace import analyze_game_workspace, generate_game_project, prepare_game_workspace
+from .runtime.modules import HleModuleListSource, UserProvidedModuleSource, build_runtime_module_map, load_static_placements
+from .runtime.reconciliation import ObservationGroup, StaticCandidate, reconcile_workspace
+from .runtime.session import DEFAULT_MAX_BACKTRACE_DEPTH, DEFAULT_MAX_TOTAL_MEMORY_BYTES, LaunchSpec, RuntimeSession
+from .runtime.workspace import (
+    list_sessions,
+    load_module_map,
+    load_observations,
+    save_module_map,
+    save_observations,
+    save_reconciliation,
+    save_session_info,
+)
+from .workspace import analyze_game_workspace, generate_game_project, load_game_workspace, prepare_game_workspace
 
 
 def _add_recovery_arguments(parser: argparse.ArgumentParser) -> None:
@@ -229,6 +249,50 @@ def _parser() -> argparse.ArgumentParser:
     match.add_argument("--section", default=".text", metavar="SECTION", help="Object section to compare (default: .text)")
     match.add_argument("--ignore-large-imms", action="store_true", help="Pass asm-differ's large-immediate normalization flag")
     match.add_argument("--timeout", type=float, default=120.0, metavar="SECONDS", help="Timeout for build and asm-differ commands (default: 120)")
+
+    runtime = sub.add_parser("runtime", help="Phase 8C: capture and reconcile PPSSPP runtime evidence against a workspace")
+    runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+
+    def _add_connection_arguments(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--host", default="127.0.0.1", help="PPSSPP debugger host (must be loopback; default: 127.0.0.1)")
+        parser.add_argument("--port", type=int, required=True, metavar="PORT", help="PPSSPP debugger port")
+        parser.add_argument("--launch", type=Path, metavar="PATH", help="Launch this PPSSPP executable instead of connecting to an already-running one")
+        parser.add_argument("--launch-arg", action="append", default=[], metavar="ARG", help="Argument to pass to --launch; may be repeated")
+        parser.add_argument("--connect-retry-seconds", type=float, default=10.0, metavar="SECONDS", help="How long to retry connecting after --launch (default: 10)")
+        parser.add_argument("--session-id", metavar="ID", help="Explicit session id; default is a generated cli-<random> id")
+
+    def _add_module_base_argument(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--module-base",
+            action="append",
+            default=[],
+            metavar="PATH=ADDRESS",
+            help="User-provided runtime base for a workspace module path (e.g. PSP_GAME/USRDIR/LOCKED.PRX=0x09A00000); may be repeated",
+        )
+
+    observe = runtime_sub.add_parser("observe", help="Install a breakpoint, resume, capture the hit, and persist the observation")
+    observe.add_argument("workspace", type=Path)
+    _add_connection_arguments(observe)
+    observe.add_argument("--address", required=True, metavar="ADDRESS", help="Runtime breakpoint address, decimal or 0x hexadecimal")
+    observe.add_argument("--timeout", type=float, default=5.0, metavar="SECONDS", help="Bounded wait for the breakpoint to hit (default: 5)")
+    observe.add_argument("--memory-read", action="append", default=[], metavar="ADDRESS:SIZE", help="Bounded memory read to capture alongside the hit; may be repeated")
+    observe.add_argument("--max-total-memory-bytes", type=int, default=DEFAULT_MAX_TOTAL_MEMORY_BYTES, metavar="N", help=f"Bound on total captured memory bytes (default: {DEFAULT_MAX_TOTAL_MEMORY_BYTES})")
+    observe.add_argument("--max-backtrace-depth", type=int, default=DEFAULT_MAX_BACKTRACE_DEPTH, metavar="N", help=f"Bound on captured backtrace depth (default: {DEFAULT_MAX_BACKTRACE_DEPTH})")
+    observe.add_argument("--no-registers", action="store_true", help="Do not capture registers on hit")
+    observe.add_argument("--no-backtrace", action="store_true", help="Do not capture a backtrace on hit")
+    observe.add_argument("--json", metavar="PATH", help="Write the observation JSON; use '-' for stdout")
+
+    modules = runtime_sub.add_parser("modules", help="Build and persist a runtime module map for a workspace")
+    modules.add_argument("workspace", type=Path)
+    _add_connection_arguments(modules)
+    _add_module_base_argument(modules)
+    modules.add_argument("--json", metavar="PATH", help="Write the module map JSON; use '-' for stdout")
+
+    reconcile = runtime_sub.add_parser("reconcile", help="Reconcile this workspace's persisted runtime observations against its static analysis")
+    reconcile.add_argument("workspace", type=Path)
+    reconcile.add_argument("--static-candidates", type=Path, metavar="FILE", help="JSON file mapping module path to a list of {kind, address, evidence} static candidates")
+    reconcile.add_argument("--json", metavar="PATH", help="Write reconciliation JSON; use '-' for stdout")
+
     return parser
 
 
@@ -332,6 +396,167 @@ def _write_assembly(result: DisassemblyResult, directory: Path) -> None:
     for section in result.assembly_sections:
         filename = _assembly_filename(section.name, section.address, used)
         (directory / filename).write_text(section.assembly, encoding="utf-8")
+
+
+def _parse_module_base(entries: list[str]) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for entry in entries:
+        path, separator, value = entry.partition("=")
+        if not separator:
+            raise ValueError(f"--module-base must be PATH=ADDRESS, got: {entry!r}")
+        mapping[path] = int(value, 0)
+    return mapping
+
+
+def _parse_memory_reads(entries: list[str]) -> list[tuple[RuntimeAddress, int]]:
+    reads: list[tuple[RuntimeAddress, int]] = []
+    for entry in entries:
+        address_text, separator, size_text = entry.partition(":")
+        if not separator:
+            raise ValueError(f"--memory-read must be ADDRESS:SIZE, got: {entry!r}")
+        address = RuntimeAddress(domain=RuntimeAddressDomain.RUNTIME.value, value=int(address_text, 0))
+        reads.append((address, int(size_text, 0)))
+    return reads
+
+
+def _load_static_candidates(path: Path | None) -> dict[str, list[StaticCandidate]]:
+    if path is None:
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"--static-candidates must contain a JSON object: {path}")
+    candidates: dict[str, list[StaticCandidate]] = {}
+    for module_path, entries in payload.items():
+        if not isinstance(entries, list):
+            raise ValueError(f"--static-candidates entries for {module_path!r} must be a JSON list")
+        candidates[module_path] = [
+            StaticCandidate(
+                kind=str(entry["kind"]),
+                address=int(entry["address"]),
+                evidence=list(entry.get("evidence", [])),
+            )
+            for entry in entries
+        ]
+    return candidates
+
+
+def _resolve_session_id(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    return f"cli-{uuid.uuid4().hex[:12]}"
+
+
+def _workspace_source_identity(workspace: Path) -> str | None:
+    try:
+        return load_game_workspace(workspace).source_identity
+    except WorkspaceError:
+        return None
+
+
+def _open_runtime_session(args: argparse.Namespace) -> RuntimeSession:
+    launch = LaunchSpec(executable=args.launch, args=args.launch_arg) if args.launch is not None else None
+    return RuntimeSession(
+        session_id=_resolve_session_id(args.session_id),
+        host=args.host,
+        port=args.port,
+        launch=launch,
+        connect_retry_seconds=args.connect_retry_seconds,
+        workspace_source_identity=_workspace_source_identity(args.workspace),
+    )
+
+
+def _run_runtime_observe(args: argparse.Namespace) -> int:
+    memory_reads = _parse_memory_reads(args.memory_read)
+    address = RuntimeAddress(domain=RuntimeAddressDomain.RUNTIME.value, value=int(args.address, 0))
+    with _open_runtime_session(args) as session:
+        observation = session.observe_breakpoint(
+            address=address,
+            timeout=args.timeout,
+            memory_reads=memory_reads,
+            capture_registers=not args.no_registers,
+            capture_backtrace=not args.no_backtrace,
+            max_backtrace_depth=args.max_backtrace_depth,
+            max_total_memory_bytes=args.max_total_memory_bytes,
+        )
+        save_session_info(args.workspace, session.info)
+        existing = []
+        with contextlib.suppress(WorkspaceError):
+            existing = load_observations(args.workspace, session.info.session_id)
+        save_observations(args.workspace, session.info.session_id, [*existing, observation])
+
+    if not _write_json(asdict(observation), args.json):
+        print(f"Session: {session.info.session_id}")
+        print(f"Breakpoint: 0x{observation.breakpoint_address.value:08X}")
+        print(f"Hit count: {observation.hit_count}")
+        if observation.registers is not None:
+            print(f"Registers captured: {len(observation.registers.registers)}")
+        print(f"Memory reads captured: {len(observation.memory)}")
+        if observation.backtrace is not None:
+            print(f"Backtrace frames: {len(observation.backtrace.frames)}")
+        for warning in observation.warnings:
+            print(f"Warning: {warning}")
+    return 0
+
+
+def _run_runtime_modules(args: argparse.Namespace) -> int:
+    module_base = _parse_module_base(args.module_base)
+    static_placements = load_static_placements(args.workspace)
+    sources = [HleModuleListSource()]
+    if module_base:
+        sources.append(UserProvidedModuleSource(module_base, static_placements=static_placements))
+
+    with _open_runtime_session(args) as session:
+        modules = build_runtime_module_map(session.transport, sources)
+
+    save_module_map(args.workspace, modules)
+    if not _write_json([asdict(module) for module in modules], args.json):
+        print(f"Modules: {len(modules)}")
+        for module in modules:
+            size = f"0x{module.runtime_size:X}" if module.runtime_size is not None else "unknown"
+            print(
+                f"  {module.name or '<unnamed>'} @ 0x{module.runtime_base.value:08X} "
+                f"(size {size}, {module.resolution_status})"
+            )
+    return 0
+
+
+def _run_runtime_reconcile(args: argparse.Namespace) -> int:
+    modules = load_module_map(args.workspace)
+    static_placements = load_static_placements(args.workspace)
+    static_candidates = _load_static_candidates(args.static_candidates)
+
+    groups: list[ObservationGroup] = []
+    for session_id in list_sessions(args.workspace):
+        for observation in load_observations(args.workspace, session_id):
+            key = f"0x{observation.breakpoint_address.value:08X}"
+            groups.append(ObservationGroup(call_site_key=key, observation=observation))
+
+    results = reconcile_workspace(
+        groups, modules=modules, module_placements=static_placements, static_candidates=static_candidates
+    )
+    save_reconciliation(args.workspace, results)
+
+    if not _write_json([asdict(result) for result in results], args.json):
+        print(f"Reconciled: {len(results)} observation(s)")
+        for result in results:
+            target = f"0x{result.static_address.value:08X}" if result.static_address is not None else "none"
+            print(
+                f"  runtime 0x{result.runtime_address.value:08X} -> static {target} "
+                f"[{result.status}] observations={result.observation_count}"
+            )
+            for conflict in result.conflicts:
+                print(f"    conflict: {conflict}")
+    return 0
+
+
+def _run_runtime_command(args: argparse.Namespace) -> int:
+    if args.runtime_command == "observe":
+        return _run_runtime_observe(args)
+    if args.runtime_command == "modules":
+        return _run_runtime_modules(args)
+    if args.runtime_command == "reconcile":
+        return _run_runtime_reconcile(args)
+    return 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -552,6 +777,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for warning in result.warnings:
                 print(f"Warning: {warning}")
             return 0
+
+        if args.command == "runtime":
+            return _run_runtime_command(args)
     except (
         OSError,
         ValueError,
@@ -562,6 +790,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         DisassemblyError,
         RecoveryBackendUnavailableError,
         RecoveryError,
+        RuntimeBackendUnavailableError,
+        RuntimeCaptureError,
+        RuntimeConnectionError,
+        RuntimeMappingError,
+        RuntimeProtocolError,
+        RuntimeTimeoutError,
         DecompilerUnavailableError,
         DecompilationError,
         MatcherUnavailableError,

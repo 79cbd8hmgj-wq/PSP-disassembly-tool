@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 
@@ -461,3 +462,99 @@ class DecompilationResult:
     target: str
     warnings: list[str] = field(default_factory=list)
     unsupported_instructions: list[str] = field(default_factory=list)
+
+
+class RuntimeAddressDomain(str, Enum):
+    """The distinct address spaces Phase 8C runtime evidence moves between.
+
+    Never collapse these into a bare int: RUNTIME is only ever produced by an
+    actual PPSSPP observation, ANALYSIS is the space pspdisasm's own
+    FunctionRecord/placement.load_address already uses, ELF_VIRTUAL is the
+    original file's pre-placement vaddr, and MODULE_RELATIVE is an offset
+    from one RuntimeModule's observed runtime base.
+    """
+
+    RUNTIME = "runtime"
+    ANALYSIS = "analysis"
+    ELF_VIRTUAL = "elf_virtual"
+    MODULE_RELATIVE = "module_relative"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeAddress:
+    domain: str
+    value: int
+    module_path: str | None = None
+
+
+@dataclass(slots=True)
+class RuntimeSessionInfo:
+    session_id: str
+    host: str
+    port: int
+    ppsspp_revision: str | None = None
+    workspace_source_identity: str | None = None
+
+
+@dataclass(slots=True)
+class RuntimeRegisterSnapshot:
+    session_id: str
+    sequence: int
+    registers: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class RuntimeMemoryObservation:
+    session_id: str
+    sequence: int
+    address: RuntimeAddress
+    size: int
+    sha256: str
+
+
+@dataclass(slots=True)
+class RuntimeBacktrace:
+    session_id: str
+    sequence: int
+    frames: list[RuntimeAddress] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RuntimeBreakpointObservation:
+    session_id: str
+    sequence: int
+    breakpoint_address: RuntimeAddress
+    hit_count: int
+    registers: RuntimeRegisterSnapshot | None = None
+    memory: list[RuntimeMemoryObservation] = field(default_factory=list)
+    backtrace: RuntimeBacktrace | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RuntimeModule:
+    name: str | None
+    runtime_base: RuntimeAddress
+    runtime_size: int | None
+    static_module_path: str | None
+    resolution_status: str
+    evidence: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RuntimeEvidenceSet:
+    session: RuntimeSessionInfo
+    modules: list[RuntimeModule] = field(default_factory=list)
+    observations: list[RuntimeBreakpointObservation] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RuntimeReconciliation:
+    static_kind: str
+    static_address: RuntimeAddress | None
+    static_evidence: list[str]
+    runtime_address: RuntimeAddress
+    resolved_module_offset: RuntimeAddress | None
+    observation_count: int
+    status: str
+    conflicts: list[str] = field(default_factory=list)

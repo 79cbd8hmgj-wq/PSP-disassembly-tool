@@ -2,7 +2,7 @@
 
 `pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, matching, and whole-game resource-analysis toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of combining upstream projects into one fork.
 
-## Current status: Phase 8B
+## Current status: Phase 8C
 
 The implemented pipeline now covers:
 
@@ -21,6 +21,7 @@ The implemented pipeline now covers:
 13. Evidence-backed whole-game module placement with fixed `ET_EXEC`, inferred boot placement, and explicitly analysis-only secondary PRX addresses.
 14. Local large-game workspaces with deterministic manifests, resumable whole-game analysis, bounded portable analysis packs, and tracked-content payload guards.
 15. An optional, pluggable retail-executable recovery layer: user-supplied external tools or pre-verified dumps can turn an encrypted `~PSP` container into a directly analyzable ELF/PRX, with strict verification and full hash provenance, before it re-enters the same analysis pipeline. No recovery/decryption capability is implemented in this repository.
+16. A general PSP runtime-intelligence subsystem: a from-scratch, bounded PPSSPP debugger client, a `RuntimeSession` abstraction for bounded breakpoint observation, tiered (never-fabricated) runtime module mapping, and a reconciliation layer that maps a runtime address back to the correct static module/function and records categorical evidence (corroborated/runtime_observed/runtime_verified/conflicting/unresolved) without erasing prior static conclusions. No PPSSPP implementation code is included; PPSSPP is driven entirely through its documented WebSocket debugger protocol.
 
 ## Implemented phases
 
@@ -214,6 +215,18 @@ See [`docs/phase8a-large-game-workspaces.md`](docs/phase8a-large-game-workspaces
 
 See [`docs/phase8b-retail-recovery.md`](docs/phase8b-retail-recovery.md) for the full data model, verification contract, failure taxonomy, and licensing boundary.
 
+### Phase 8C — general PSP runtime intelligence
+
+- `pspdisasm.runtime.transport.PpssppDebuggerTransport`: a from-scratch, bounded client for PPSSPP's WebSocket JSON debugger protocol (independent reimplementation, no PPSSPP/GPL code) — explicit connect/request/event-wait timeouts, a maximum frame size checked *before* reading a declared payload, a bounded per-event queue, and typed errors (`RuntimeConnectionError`/`RuntimeProtocolError`/`RuntimeTimeoutError`) instead of raw socket/JSON exceptions.
+- `pspdisasm.runtime.session.RuntimeSession`: connect to an already-running PPSSPP or launch a user-supplied executable (argument-list subprocess, never `shell=True`); closing the session — including via an exception inside a `with` block — always removes every breakpoint it installed and, in launch mode, always terminates the process it started.
+- `RuntimeSession.observe_breakpoint()`: install → resume → bounded wait → capture registers/bounded memory/bounded backtrace → the breakpoint is *always* removed in a `finally`, success or failure.
+- `pspdisasm.runtime.modules`: tiered, never-fabricated runtime module mapping. `HleModuleListSource` probes PPSSPP for an HLE module list and falls through silently if unsupported (this event's existence is not verified against real PPSSPP by this toolkit's own test suite); `UserProvidedModuleSource` is the proven Phase 8C baseline — an explicit caller-supplied mapping, sized from this workspace's own Phase 7G `module_placements.json` when available, that never claims toolkit-proven accuracy.
+- `pspdisasm.runtime.reconciliation`: maps one runtime observation back to a static module/function without ever guessing a load address — runtime address → observed runtime module range → module-relative offset → that module's own `placement.load_address` → analysis address → match against caller-supplied static candidates. Categorical evidence states (`unresolved`/`inferred`/`corroborated`/`runtime_observed`/`runtime_verified`/`conflicting`) replace additive confidence scoring; repeated observations escalate confidence, and two observations at the same call site resolving to different targets are both preserved and flagged `conflicting` rather than one overwriting the other.
+- Runtime evidence lives under `workspace/runtime/` (`sessions/`, `evidence/<session>/observations.json`, `modules.json`, `reconciliation.json`), atomically written, with its own schema version independent of `ANALYSIS_SCHEMA_VERSION` — capturing runtime evidence never forces a static re-analysis, and vice versa.
+- `pspdisasm runtime observe|modules|reconcile` CLI commands; no full debugger shell.
+
+See [`docs/phase8c-runtime-intelligence.md`](docs/phase8c-runtime-intelligence.md) for the full architecture, address-domain model, module-mapping tiers, reconciliation algorithm, and what remains explicitly deferred (automatic HLE module enumeration beyond the capability probe, kernel-structure-based module mapping, and any multi-emulator/multi-build evidence fusion).
+
 ## Installation
 
 Core parsing:
@@ -359,6 +372,40 @@ pspdisasm make-pack /path/to/game-workspace \
 ```
 
 The default pack evidence budget is 16 MiB with a 4096-byte context window; `--max-bytes` and `--context-bytes` can lower or raise those limits explicitly. Portable manifests and pack metadata omit the machine-local game location. Existing direct `game-project` workflows remain supported.
+
+### Capture and reconcile runtime evidence
+
+Against an already-running PPSSPP with its remote debugger enabled and local-only:
+
+```bash
+pspdisasm runtime observe /path/to/game-workspace --port 56244 \
+  --address 0x08998420 --timeout 5 \
+  --memory-read 0x08810000:16
+```
+
+Or launch a user-supplied PPSSPP executable instead of connecting to one already running:
+
+```bash
+pspdisasm runtime observe /path/to/game-workspace \
+  --port 56244 --launch /path/to/PPSSPPHeadless --launch-arg game.iso \
+  --address 0x08998420 --timeout 5
+```
+
+Build a runtime module map (an HLE-reported list if PPSSPP's debugger actually supports it, otherwise an explicit fallback you provide, sized from this workspace's own module placements):
+
+```bash
+pspdisasm runtime modules /path/to/game-workspace --port 56244 \
+  --module-base PSP_GAME/USRDIR/LOCKED.PRX=0x09A00000
+```
+
+Reconcile every persisted observation in the workspace against its static analysis:
+
+```bash
+pspdisasm runtime reconcile /path/to/game-workspace \
+  --static-candidates candidates.json
+```
+
+`--static-candidates` is a JSON file mapping a module path to a list of `{"kind", "address", "evidence"}` static facts (function entries, call-edge targets, jump-table targets, ...) in that module's own analysis address space; omit it to still record every observation's resolved module/offset with status `runtime_observed`. Runtime evidence never overwrites static conclusions — repeated observations at the same resolved target accumulate `observation_count` and escalate to `runtime_verified`, and two observations at the same call site resolving to different targets are both kept and flagged `conflicting`.
 
 ### Analyze one executable
 
@@ -548,6 +595,25 @@ from pspdisasm import (
 
 `generate_game_project()` is the high-level direct whole-game API and accepts trusted `container_parsers=` for title-specific archive support. `analyze_game_resources()` is the Phase 7C/7D API for already-extracted `DiscResourceRecord` values. `decode_prxreloc2()` and `apply_psp_relocation_word()` expose the Phase 7E compressed-relocation decoder and pure word transform. `build_relocated_load_view()` returns a Phase 7F `RelocatedLoadView` at an explicit caller-provided runtime address. Phase 7G exposes `ModulePlacement`, `ModulePlacementInput`, and `plan_module_placements()`; `generate_game_project()` consumes the planner automatically and records whether each chosen address is a runtime-backed claim or analysis-only placement. Phase 8A exposes `GameWorkspaceManifest`, `WorkspaceFileRecord`, `WorkspaceAnalysisResult`, `prepare_game_workspace()`, `load_game_workspace()`, `analyze_game_workspace()`, `AnalysisPackResult`, and `create_analysis_pack()` for local large-game workflows and selective portable evidence. Phase 8B exposes the `RecoveryBackend` protocol, `ExternalDecryptorBackend`, `PrebuiltDumpBackend`, `recover_bytes()`, `select_recovery_backend()`, and the `RecoveredPayload`/`RecoveryResult`/`RecoveryOutcome` result types; `generate_game_project()`/`analyze_game_workspace()` accept `recovery_backends=` to opt in.
 
+Phase 8C is a separate `pspdisasm.runtime` subpackage (not imported by `import pspdisasm` itself, so static-analysis-only use never pulls in socket/subprocess-facing code):
+
+```python
+from pspdisasm.runtime import (
+    HleModuleListSource,
+    LaunchSpec,
+    RuntimeSession,
+    UserProvidedModuleSource,
+    build_runtime_module_map,
+    load_static_placements,
+    reconcile_workspace,
+    save_evidence_set,
+    verify_ppsspp_bundle,
+)
+from pspdisasm.model import RuntimeAddress, RuntimeAddressDomain
+```
+
+`RuntimeSession(host=..., port=..., launch=LaunchSpec(...) | None)` is a context manager; `session.observe_breakpoint(address=RuntimeAddress(domain=RuntimeAddressDomain.RUNTIME.value, value=...), timeout=...)` returns a `RuntimeBreakpointObservation`. `build_runtime_module_map(session.transport, [HleModuleListSource(), UserProvidedModuleSource({...})])` tries tiers in order and never merges them. `reconcile_workspace()` and `reconcile_observation()` (in `pspdisasm.runtime.reconciliation`, alongside `StaticCandidate` and `ObservationGroup`) implement the address-domain-safe reconciliation algorithm. `pspdisasm.runtime.workspace` (`save_session_info`, `save_observations`, `save_module_map`, `save_reconciliation`, and their `load_*` counterparts) persists to `workspace/runtime/`.
+
 ## Resource-analysis safety model
 
 A signature or extension alone does not authorize arbitrary carving.
@@ -572,9 +638,10 @@ A signature or extension alone does not authorize arbitrary carving.
 - **asm-differ** — original-vs-recompiled matching backend, kept out-of-process.
 - **pycdlib** — optional ISO9660 traversal dependency; LGPL source is not copied into the MIT core.
 - **maxcso** — CISO/CSO behavior/reference source for the clean-room reader.
-- **PPSSPP** — PSP disc/media/container/relocation/loading behavioral reference; GPL code is not copied into the core.
+- **PPSSPP** — PSP disc/media/container/relocation/loading behavioral reference through Phase 8B; from Phase 8C onward, also driven live as a user-supplied, out-of-process emulator through its own documented WebSocket debugger protocol. No PPSSPP implementation code is copied into the core either way — `pspdisasm.runtime.transport` is an independent client for that protocol.
 - **PSPLibDoc-compatible data** — optional external NID naming input; no NID database is bundled.
 - **User-supplied recovery tooling** — Phase 8B's `ExternalDecryptorBackend`/`PrebuiltDumpBackend` invoke or verify a user-supplied, out-of-process recovery tool or pre-verified dump (which may itself be GPL-licensed or wrap PPSSPP/KIRK-compatible tooling the user is licensed to use); the toolkit implements no PSP cryptography and never links against or bundles such a tool.
+- **User-supplied PPSSPP build** — Phase 8C's `RuntimeSession` connects to an already-running, user-supplied PPSSPP with its remote debugger enabled, or launches a user-supplied executable out-of-process; the toolkit bundles no emulator binary.
 
 ## Current limitations
 
@@ -595,6 +662,11 @@ A signature or extension alone does not authorize arbitrary carving.
 - No automatic PSP compiler/version identification yet.
 - Phase 6C infers conservative structural candidates; it does not claim exact C struct/header recovery.
 - Phase 8A does not upload or remotely host retail game data; the original game remains required locally when analysis needs bytes outside a selected pack. Phase 8B lets a user-supplied backend recover an encrypted module locally, but the toolkit itself still performs no decryption.
+- Phase 8C's `HleModuleListSource` probes for an HLE module-list debugger event; that event's existence and schema are not verified against real PPSSPP by this toolkit's own (synthetic-only) test suite, so it fails through to the explicit user-provided mapping tier rather than being assumed to work. A live manual run is what actually confirms or refutes it.
+- Phase 8C ships no kernel-structure-based module mapping (walking PSP loader/HLE structures directly from memory); that tier is reserved as an extension point but not implemented.
+- Phase 8C reconciliation compares one runtime observation against caller-supplied static candidates; it does not itself derive candidates from `game_analysis.json`/disassembly output automatically — `--static-candidates` (CLI) or the Python API's `static_candidates=` mapping is how those facts get supplied today.
+- No multi-session/multi-build runtime evidence fusion beyond per-(call site, target) observation counts; conflicting evidence from different PPSSPP builds or process runs is not distinguished from conflicting evidence within one session.
+- No emulator binary, game payload, save state, or PPSSPP debugger bundle is included in this repository or its test suite; Phase 8C's live-connection and live-launch paths are exercised only against a synthetic in-repo debugger fixture in CI.
 
 ## Development
 
