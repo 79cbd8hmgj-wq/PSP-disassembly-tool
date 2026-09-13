@@ -558,3 +558,46 @@ class RuntimeReconciliation:
     observation_count: int
     status: str
     conflicts: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DecompilationAttempt:
+    attempt_id: str
+    variant_reason: str
+    assembly_sha256: str
+    context_sha256: list[str]
+    m2c_command: list[str]
+    m2c_version: str | None
+    target: str
+    outcome: str
+    candidate_sha256: str | None = None
+    toolchain_name: str | None = None
+    toolchain_identity: dict[str, object] | None = None
+    object_sha256: str | None = None
+    match_raw_score: int | None = None
+    match_max_score: int | None = None
+    match_similarity_percent: float | None = None
+    match_exact: bool | None = None
+    matching_rows: int | None = None
+    changed_rows: int | None = None
+    added_rows: int | None = None
+    removed_rows: int | None = None
+    reference_lacks_relocations: bool = False
+    diagnostics: list[str] = field(default_factory=list)
+    artifact_paths: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class FunctionDecompilationState:
+    module: str
+    function: str
+    address: int
+    status: str
+    attempts: int = 0
+    best_attempt_id: str | None = None
+    best_match_percent: float | None = None
+    static_confidence: float | None = None
+    static_evidence: list[str] = field(default_factory=list)
+    runtime_status: str | None = None
+    last_failure: str | None = None
+    attempt_history: list[DecompilationAttempt] = field(default_factory=list)
