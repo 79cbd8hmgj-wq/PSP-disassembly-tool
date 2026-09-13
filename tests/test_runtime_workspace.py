@@ -5,6 +5,7 @@ import json
 import pytest
 
 from pspdisasm.errors import WorkspaceError
+from pspdisasm.workspace import analyze_game_workspace, prepare_game_workspace
 from pspdisasm.model import (
     RuntimeAddress,
     RuntimeBacktrace,
@@ -193,3 +194,50 @@ def test_writes_are_atomic_no_leftover_temp_files(tmp_path):
 
     leftovers = list(runtime_root(tmp_path).rglob(".*.tmp"))
     assert leftovers == []
+
+
+def test_static_analysis_rerun_never_touches_persisted_runtime_evidence(tmp_path):
+    """The two schemas/lifecycles are independent in both directions: capturing
+    runtime evidence must not invalidate the static-analysis cache (Phase 8C's
+    own claim), and re-running static analysis must not silently wipe runtime
+    evidence sitting alongside it."""
+    from tests.test_workspace import _build_extracted_game
+
+    source = tmp_path / "source"
+    workspace = tmp_path / "workspace"
+    _build_extracted_game(source)
+    prepare_game_workspace(source, workspace)
+
+    save_session_info(workspace, _session_info())
+    save_module_map(
+        workspace,
+        [
+            RuntimeModule(
+                name="EBOOT.BIN",
+                runtime_base=_address(0x08800000),
+                runtime_size=None,
+                static_module_path="PSP_GAME/SYSDIR/EBOOT.BIN",
+                resolution_status="user_provided",
+            )
+        ],
+    )
+    save_observations(
+        workspace,
+        "sess-1",
+        [RuntimeBreakpointObservation(session_id="sess-1", sequence=1, breakpoint_address=_address(1), hit_count=1)],
+    )
+    save_reconciliation(workspace, [])
+
+    first = analyze_game_workspace(workspace)
+    assert first.reused is False
+
+    # Runtime evidence must have had zero effect on the static analysis cache key.
+    second = analyze_game_workspace(workspace)
+    assert second.reused is True
+    assert first.analysis_key == second.analysis_key
+
+    # And the static re-run must not have touched any runtime evidence.
+    assert load_session_info(workspace, "sess-1") == _session_info()
+    assert len(load_module_map(workspace)) == 1
+    assert len(load_observations(workspace, "sess-1")) == 1
+    assert load_reconciliation(workspace) == []

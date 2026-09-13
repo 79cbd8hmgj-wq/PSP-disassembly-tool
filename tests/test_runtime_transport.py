@@ -363,3 +363,46 @@ def test_try_request_returns_event_on_success():
 def test_rejects_non_loopback_host():
     with pytest.raises(RuntimeConnectionError):
         PpssppDebuggerTransport("example.com", 12345)
+
+
+def test_connect_timeout_raises_runtime_timeout_error(monkeypatch):
+    """A loopback connect refuses instantly rather than hanging, so the only
+    reliable way to exercise the connect_timeout path is to force the
+    underlying socket call to time out."""
+    import socket as socket_module
+
+    def fake_create_connection(*args, **kwargs):
+        raise TimeoutError("simulated connect timeout")
+
+    monkeypatch.setattr(socket_module, "create_connection", fake_create_connection)
+
+    with pytest.raises(RuntimeTimeoutError, match="timed out"):
+        PpssppDebuggerTransport("127.0.0.1", 1, connect_timeout=0.1)
+
+
+def test_event_queue_is_bounded_and_evicts_oldest_events():
+    def handler(conn: FakeConnection) -> None:
+        conn.bootstrap()
+        # Flood one event name well past the bound before it is ever drained.
+        for index in range(10):
+            conn.send_event("hle.currentThread", threadId=index)
+        # Then answer the real request so the connection can be torn down cleanly.
+        request = conn.recv_json()
+        conn.reply_ok(request, categories=[])
+
+    server = FakePpssppServer(handler)
+    try:
+        transport = _connect(server.port, max_queued_events=3)
+        try:
+            # get_registers() drains frames until it finds its own ticket,
+            # queueing every "hle.currentThread" event it passes along the way.
+            transport.get_registers()
+            queue = transport._queued_events["hle.currentThread"]
+            assert len(queue) == 3
+            # A bounded deque evicts from the left as new items arrive, so
+            # only the most recent three survive.
+            assert [item["threadId"] for item in queue] == [7, 8, 9]
+        finally:
+            transport.close()
+    finally:
+        server.join()
