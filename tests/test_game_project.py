@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import struct
@@ -13,8 +14,9 @@ from pspdisasm.disc import GameDiscManifest, GameModuleRecord
 from pspdisasm.errors import DisassemblyError
 from pspdisasm.linker import ModuleAnalysisInput
 from pspdisasm.model import ModuleLinkAnalysis
+from pspdisasm.recovery import RecoveryOutcome
 from pspdisasm.resource_containers import ContainerEntry, ContainerInspection
-from tests.fixtures import build_allegrex_elf32, build_psp_container_header
+from tests.fixtures import FakeRecoveryBackend, build_allegrex_elf32, build_psp_container_header
 
 
 SFO_HEADER = struct.Struct("<4sIIII")
@@ -126,6 +128,119 @@ def test_generate_game_project_analyzes_decrypted_boot_and_records_encrypted_mod
     assert locked["project_path"] is None
     assert locked["module_name"] == "GAMEBOOT"
     assert any("decryption" in warning.lower() for warning in locked["warnings"])
+    assert locked["recovery"] is None
+    assert result.recovered_count == 0
+
+
+def test_generate_game_project_with_no_recovery_backend_matches_pre_8b_behavior(tmp_path):
+    """Locks in backward compatibility: identical output with recovery_backends=()."""
+    image = tmp_path / "game.iso"
+    output_old = tmp_path / "decomp_default"
+    output_explicit = tmp_path / "decomp_explicit_empty"
+    _build_game_iso(
+        image,
+        eboot=build_allegrex_elf32(),
+        modules={"PSP_GAME/USRDIR/LOCKED.PRX": build_psp_container_header()},
+    )
+
+    default_result = generate_game_project(image, output_old)
+    explicit_result = generate_game_project(image, output_explicit, recovery_backends=())
+
+    for result in (default_result, explicit_result):
+        assert result.needs_decryption_count == 1
+        assert result.recovered_count == 0
+        assert result.analyzed_count == 1
+        assert result.failed_count == 0
+
+
+def test_generate_game_project_recovers_encrypted_module_with_configured_backend(tmp_path):
+    image = tmp_path / "game.iso"
+    output = tmp_path / "recovered_decomp"
+    _build_game_iso(
+        image,
+        eboot=build_allegrex_elf32(),
+        modules={"PSP_GAME/USRDIR/LOCKED.PRX": build_psp_container_header()},
+    )
+
+    backend = FakeRecoveryBackend()
+    result = generate_game_project(image, output, recovery_backends=[backend])
+
+    assert result.needs_decryption_count == 0
+    assert result.recovered_count == 1
+    assert result.analyzed_count == 1  # the native EBOOT.BIN, distinguishable from the recovered one
+    assert result.failed_count == 0
+    assert (output / "projects/PSP_GAME/USRDIR/LOCKED.PRX/splat.yaml").exists()
+
+    analysis = json.loads((output / "metadata/game_analysis.json").read_text(encoding="utf-8"))
+    modules = {record["path"]: record for record in analysis["modules"]}
+    recovered = modules["PSP_GAME/USRDIR/LOCKED.PRX"]
+    assert recovered["status"] == "analyzed_recovered"
+    assert recovered["function_count"] > 0
+    assert recovered["recovery"]["outcome"] == RecoveryOutcome.VERIFIED.value
+    assert recovered["recovery"]["recovery_backend"] == "fake"
+    assert recovered["recovery"]["verification"] == "valid_elf32_psp"
+    assert recovered["recovery"]["original_sha256"] == hashlib.sha256(
+        build_psp_container_header()
+    ).hexdigest()
+    assert recovered["recovery"]["recovered_sha256"] == hashlib.sha256(
+        build_allegrex_elf32()
+    ).hexdigest()
+
+    recovered_bytes_path = output / "recovered/PSP_GAME/USRDIR/LOCKED.PRX"
+    assert recovered_bytes_path.read_bytes() == build_allegrex_elf32()
+    provenance = json.loads(
+        (output / "recovered/PSP_GAME/USRDIR/LOCKED.PRX.recovery.json").read_text(encoding="utf-8")
+    )
+    assert provenance["outcome"] == RecoveryOutcome.VERIFIED.value
+
+
+def test_generate_game_project_isolates_recovery_failure_without_aborting_game(tmp_path):
+    image = tmp_path / "game.iso"
+    output = tmp_path / "failed_recovery_decomp"
+    _build_game_iso(
+        image,
+        eboot=build_allegrex_elf32(),
+        modules={"PSP_GAME/USRDIR/LOCKED.PRX": build_psp_container_header()},
+    )
+
+    backend = FakeRecoveryBackend(error=RuntimeError("synthetic backend crash"))
+    result = generate_game_project(image, output, recovery_backends=[backend])
+
+    assert result.module_count == 2
+    assert result.analyzed_count == 1  # EBOOT.BIN still analyzed despite the other module's failure
+    assert result.needs_decryption_count == 1
+    assert result.recovered_count == 0
+    assert result.failed_count == 0
+    assert (output / "projects/PSP_GAME/SYSDIR/EBOOT.BIN/splat.yaml").exists()
+
+    analysis = json.loads((output / "metadata/game_analysis.json").read_text(encoding="utf-8"))
+    modules = {record["path"]: record for record in analysis["modules"]}
+    locked = modules["PSP_GAME/USRDIR/LOCKED.PRX"]
+    assert locked["status"] == "needs_decryption"
+    assert any("recovery attempted and failed" in warning for warning in locked["warnings"])
+    assert locked["recovery"]["outcome"] == RecoveryOutcome.BACKEND_FAILED.value
+    assert locked["recovery"]["recovery_backend"] == "fake"
+
+
+def test_generate_game_project_records_no_backend_accepted_recovery_outcome(tmp_path):
+    image = tmp_path / "game.iso"
+    output = tmp_path / "rejected_recovery_decomp"
+    _build_game_iso(
+        image,
+        eboot=build_allegrex_elf32(),
+        modules={"PSP_GAME/USRDIR/LOCKED.PRX": build_psp_container_header()},
+    )
+
+    backend = FakeRecoveryBackend(accept=False)
+    result = generate_game_project(image, output, recovery_backends=[backend])
+
+    assert result.needs_decryption_count == 1
+    assert result.recovered_count == 0
+
+    analysis = json.loads((output / "metadata/game_analysis.json").read_text(encoding="utf-8"))
+    modules = {record["path"]: record for record in analysis["modules"]}
+    locked = modules["PSP_GAME/USRDIR/LOCKED.PRX"]
+    assert locked["recovery"]["outcome"] == RecoveryOutcome.NO_BACKEND_ACCEPTED.value
 
 
 def test_generate_game_project_links_all_successfully_analyzed_modules(tmp_path, monkeypatch):

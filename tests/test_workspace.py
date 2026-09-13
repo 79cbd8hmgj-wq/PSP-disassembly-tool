@@ -7,7 +7,7 @@ import pytest
 
 import pspdisasm.workspace as workspace_module
 from pspdisasm.workspace import analyze_game_workspace, prepare_game_workspace
-from tests.fixtures import build_allegrex_elf32
+from tests.fixtures import FakeRecoveryBackend, build_allegrex_elf32
 from tests.test_game_project import PNG, _build_sfo
 
 
@@ -138,6 +138,78 @@ def test_analyze_workspace_invalidates_cache_when_toolkit_version_changes(tmp_pa
     assert first.analysis_key == second.analysis_key
     assert third.analysis_key != first.analysis_key
     assert len(calls) == 2
+
+
+def test_analyze_workspace_reuses_cache_when_recovery_backend_identity_is_unchanged(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    workspace = tmp_path / "workspace"
+    _build_extracted_game(source)
+    prepare_game_workspace(source, workspace)
+
+    calls = []
+    real_generate = workspace_module.generate_game_project
+
+    def record_generate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_generate(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_module, "generate_game_project", record_generate)
+
+    backend = FakeRecoveryBackend(name="fixed-name")
+    first = analyze_game_workspace(workspace, recovery_backends=[backend])
+    second = analyze_game_workspace(workspace, recovery_backends=[backend])
+
+    assert first.reused is False
+    assert second.reused is True
+    assert first.analysis_key == second.analysis_key
+    assert len(calls) == 1
+    assert first.game_project.recovered_count == 0
+
+
+def test_analyze_workspace_invalidates_cache_when_recovery_backend_identity_changes(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    workspace = tmp_path / "workspace"
+    _build_extracted_game(source)
+    prepare_game_workspace(source, workspace)
+
+    calls = []
+    real_generate = workspace_module.generate_game_project
+
+    def record_generate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_generate(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_module, "generate_game_project", record_generate)
+
+    without_backend = analyze_game_workspace(workspace)
+    with_backend_a = analyze_game_workspace(workspace, recovery_backends=[FakeRecoveryBackend(name="a")])
+    with_backend_b = analyze_game_workspace(workspace, recovery_backends=[FakeRecoveryBackend(name="b")])
+
+    # Each distinct backend configuration is a cache miss (the workspace keeps
+    # only its single most recent analysis, mirroring the existing
+    # toolkit-version-change behavior above) and gets a distinct analysis key.
+    assert without_backend.reused is False
+    assert with_backend_a.reused is False
+    assert with_backend_b.reused is False
+    assert len({
+        without_backend.analysis_key,
+        with_backend_a.analysis_key,
+        with_backend_b.analysis_key,
+    }) == 3
+    assert len(calls) == 3
+
+
+def test_analyze_workspace_invalidates_cache_when_recovery_max_bytes_changes(tmp_path):
+    source = tmp_path / "source"
+    workspace = tmp_path / "workspace"
+    _build_extracted_game(source)
+    prepare_game_workspace(source, workspace)
+
+    backend = FakeRecoveryBackend(name="fixed-name")
+    first = analyze_game_workspace(workspace, recovery_backends=[backend], recovery_max_output_bytes=1024)
+    second = analyze_game_workspace(workspace, recovery_backends=[backend], recovery_max_output_bytes=2048)
+
+    assert first.analysis_key != second.analysis_key
 
 
 def test_analyze_workspace_rejects_unsupported_schema_without_writing_state(tmp_path):

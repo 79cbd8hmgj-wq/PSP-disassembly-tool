@@ -16,6 +16,17 @@ from .nids import NidDatabase, load_nid_databases
 from .placement import ModulePlacement, ModulePlacementInput, plan_module_placements
 from .project import generate_project
 from .prxreloc2 import apply_psp_relocation_word, decode_prxreloc2
+from .recovery import (
+    DEFAULT_MAX_RECOVERED_BYTES,
+    ExternalDecryptorBackend,
+    PrebuiltDumpBackend,
+    RecoveredPayload,
+    RecoveryBackend,
+    RecoveryOutcome,
+    RecoveryResult,
+    recover_bytes,
+    select_recovery_backend,
+)
 from .resource_containers import (
     ContainerCandidateProfile,
     ContainerEntry,
@@ -44,11 +55,18 @@ __all__ = [
     "ContainerEntry",
     "ContainerFamily",
     "ContainerInspection",
+    "DEFAULT_MAX_RECOVERED_BYTES",
+    "ExternalDecryptorBackend",
     "GameWorkspaceManifest",
     "ModuleAnalysisInput",
     "ModulePlacement",
     "ModulePlacementInput",
     "NidDatabase",
+    "PrebuiltDumpBackend",
+    "RecoveredPayload",
+    "RecoveryBackend",
+    "RecoveryOutcome",
+    "RecoveryResult",
     "RelocatedLoadView",
     "ResourceContainerParser",
     "WorkspaceAnalysisResult",
@@ -77,6 +95,8 @@ __all__ = [
     "plan_module_placements",
     "prepare_game_workspace",
     "profile_container_candidate",
+    "recover_bytes",
     "scan_game_disc",
     "select_container_parser",
+    "select_recovery_backend",
 ]

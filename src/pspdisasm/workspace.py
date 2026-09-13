@@ -13,10 +13,14 @@ from .disc import GameDiscManifest, scan_game_disc
 from .disc_image import open_disc_stream
 from .errors import EngineUnavailableError, ParseError, WorkspaceError
 from .game_project import GameProjectResult, generate_game_project
+from .recovery import DEFAULT_MAX_RECOVERED_BYTES, RecoveryBackend
 
 
 WORKSPACE_SCHEMA_VERSION = 1
-ANALYSIS_SCHEMA_VERSION = 1
+# Bumped for Phase 8B: the game-project summary gained `recovered_count`, so a
+# cached analysis/state.json from an older toolkit version must not be reused
+# as-is (it lacks the field `_state_to_game_project` now requires).
+ANALYSIS_SCHEMA_VERSION = 2
 _HASH_CHUNK_BYTES = 1024 * 1024
 _LOCAL_FILE = ".pspdisasm-local.json"
 _FILES_MANIFEST = "manifests/files.json"
@@ -387,18 +391,32 @@ def _validate_snapshot(source: Path, source_kind: str, snapshot: object) -> None
         raise WorkspaceError("Workspace source changed; run prepare-game again before analysis")
 
 
-def _analysis_key(manifest: GameWorkspaceManifest, nid_databases: Iterable[Path | str]) -> str:
+def _analysis_key(
+    manifest: GameWorkspaceManifest,
+    nid_databases: Iterable[Path | str],
+    recovery_backends: Iterable[RecoveryBackend] = (),
+    recovery_max_output_bytes: int = DEFAULT_MAX_RECOVERED_BYTES,
+) -> str:
     nid_identity: list[dict[str, object]] = []
     for value in nid_databases:
         path = Path(value)
         if not path.is_file():
             raise WorkspaceError(f"NID database is not readable: {path}")
         nid_identity.append({"size": path.stat().st_size, "sha256": _sha256_path(path)})
+    # Each backend's `.name` is required to already be a content/config-derived
+    # identity (ExternalDecryptorBackend embeds its resolved command,
+    # PrebuiltDumpBackend embeds its manifest hash), so listing names here is
+    # enough to invalidate the cache whenever recovery configuration changes.
+    backend_identity = [
+        str(getattr(backend, "name", backend.__class__.__name__)) for backend in recovery_backends
+    ]
     payload = {
         "source_identity": manifest.source_identity,
         "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
         "toolkit_version": _toolkit_version(),
         "nid_databases": nid_identity,
+        "recovery_backends": backend_identity,
+        "recovery_max_output_bytes": recovery_max_output_bytes,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -425,6 +443,7 @@ def _state_to_game_project(analysis_root: Path, payload: dict[str, object]) -> G
         analyzed_count=number("analyzed_count"),
         needs_decryption_count=number("needs_decryption_count"),
         failed_count=number("failed_count"),
+        recovered_count=number("recovered_count"),
         resource_count=number("resource_count"),
         known_resource_count=number("known_resource_count"),
         unknown_resource_count=number("unknown_resource_count"),
@@ -444,6 +463,7 @@ def _game_project_summary(result: GameProjectResult) -> dict[str, int]:
         "analyzed_count": result.analyzed_count,
         "needs_decryption_count": result.needs_decryption_count,
         "failed_count": result.failed_count,
+        "recovered_count": result.recovered_count,
         "resource_count": result.resource_count,
         "known_resource_count": result.known_resource_count,
         "unknown_resource_count": result.unknown_resource_count,
@@ -484,13 +504,16 @@ def analyze_game_workspace(
     workspace_dir: Path | str,
     *,
     nid_databases: Iterable[Path | str] = (),
+    recovery_backends: Iterable[RecoveryBackend] = (),
+    recovery_max_output_bytes: int = DEFAULT_MAX_RECOVERED_BYTES,
 ) -> WorkspaceAnalysisResult:
     workspace = Path(workspace_dir)
     manifest = load_game_workspace(workspace)
     source, snapshot = _load_local_source(workspace, manifest)
     _validate_snapshot(source, manifest.source_kind, snapshot)
     databases = tuple(nid_databases)
-    analysis_key = _analysis_key(manifest, databases)
+    backends = tuple(recovery_backends)
+    analysis_key = _analysis_key(manifest, databases, backends, recovery_max_output_bytes)
     analysis_root = workspace / "analysis"
     game_root = analysis_root / "game_project"
     state_path = workspace / _ANALYSIS_STATE
@@ -509,7 +532,13 @@ def analyze_game_workspace(
 
     if game_root.exists():
         shutil.rmtree(game_root)
-    game_project = generate_game_project(source, game_root, nid_databases=databases)
+    game_project = generate_game_project(
+        source,
+        game_root,
+        nid_databases=databases,
+        recovery_backends=backends,
+        recovery_max_output_bytes=recovery_max_output_bytes,
+    )
     _update_analysis_states(workspace, manifest, game_project)
     state = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,

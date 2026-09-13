@@ -15,14 +15,15 @@ from .disc import (
 )
 from .disassembler import disassemble_file
 from .elf32 import parse_elf32
-from .errors import DisassemblyError, EngineUnavailableError, ParseError
+from .errors import DisassemblyError, EngineUnavailableError, ParseError, RecoveryBackendUnavailableError, RecoveryError
 from .game_resources import analyze_game_resources
 from .linker import ModuleAnalysisInput, link_modules
 from .load_view import build_relocated_load_view
-from .model import ExecutableModel, ModuleLinkAnalysis
+from .model import ExecutableModel, ModuleLinkAnalysis, RecoveryProvenance
 from .nids import load_nid_databases
 from .placement import ModulePlacement, ModulePlacementInput, plan_module_placements
 from .project import generate_project
+from .recovery import DEFAULT_MAX_RECOVERED_BYTES, RecoveryBackend, recover_bytes
 from .resource_containers import ResourceContainerParser
 
 
@@ -46,6 +47,7 @@ class GameModuleAnalysisRecord:
     reference_count: int = 0
     string_count: int = 0
     warnings: list[str] = field(default_factory=list)
+    recovery: RecoveryProvenance | None = None
 
 
 @dataclass(slots=True)
@@ -69,6 +71,7 @@ class GameProjectResult:
     analyzed_count: int
     needs_decryption_count: int
     failed_count: int
+    recovered_count: int = 0
     resource_count: int = 0
     known_resource_count: int = 0
     unknown_resource_count: int = 0
@@ -88,6 +91,7 @@ class _PreparedModule:
     project_root: Path
     model: ExecutableModel
     module_name: str | None
+    recovery: RecoveryProvenance | None = None
 
 
 def _safe_relative_target(root: Path, relative_path: str) -> Path:
@@ -112,6 +116,28 @@ def _module_name(model: ExecutableModel) -> str | None:
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    try:
+        temp.write_bytes(data)
+        temp.replace(path)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def _atomic_write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    try:
+        temp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp.replace(path)
+    finally:
+        if temp.exists():
+            temp.unlink()
 
 
 def _relative_display(path: Path, output: Path) -> str:
@@ -148,11 +174,14 @@ def generate_game_project(
     *,
     nid_databases: Iterable[Path | str] = (),
     container_parsers: Iterable[ResourceContainerParser] = (),
+    recovery_backends: Iterable[RecoveryBackend] = (),
+    recovery_max_output_bytes: int = DEFAULT_MAX_RECOVERED_BYTES,
 ) -> GameProjectResult:
     source_path = Path(source)
     output = Path(output_dir)
     database_paths = tuple(nid_databases)
     parsers = tuple(container_parsers)
+    recovery_backend_list = tuple(recovery_backends)
 
     if source_path.is_dir():
         manifest = scan_game_directory(source_path, output)
@@ -190,20 +219,56 @@ def generate_game_project(
         extracted = _safe_relative_target(output, candidate.output_path)
         project_root = _safe_relative_target(output / "projects", candidate.path)
         model: ExecutableModel | None = None
+        recovery_provenance: RecoveryProvenance | None = None
         try:
             model = analyze_file(extracted)
             name = _module_name(model)
             if model.needs_decryption:
-                records_by_path[candidate.path] = GameModuleAnalysisRecord(
-                    path=candidate.path,
-                    extracted_path=_relative_display(extracted, output),
-                    executable_kind=candidate.executable_kind,
-                    is_boot=candidate.is_boot,
-                    status="needs_decryption",
-                    module_name=name,
-                    warnings=list(model.warnings),
+                if not recovery_backend_list:
+                    records_by_path[candidate.path] = GameModuleAnalysisRecord(
+                        path=candidate.path,
+                        extracted_path=_relative_display(extracted, output),
+                        executable_kind=candidate.executable_kind,
+                        is_boot=candidate.is_boot,
+                        status="needs_decryption",
+                        module_name=name,
+                        warnings=list(model.warnings),
+                    )
+                    continue
+
+                # Recovery is opt-in: with no backend configured the branch
+                # above preserves pre-Phase-8B behavior exactly. Recovery
+                # failures are isolated to this module and never escalate to
+                # a game-wide error; the module simply stays needs_decryption
+                # with its attempt recorded for diagnosis.
+                try:
+                    recovery_result = recover_bytes(
+                        extracted.read_bytes(),
+                        backends=recovery_backend_list,
+                        max_output_bytes=recovery_max_output_bytes,
+                    )
+                except (RecoveryBackendUnavailableError, RecoveryError) as exc:
+                    records_by_path[candidate.path] = GameModuleAnalysisRecord(
+                        path=candidate.path,
+                        extracted_path=_relative_display(extracted, output),
+                        executable_kind=candidate.executable_kind,
+                        is_boot=candidate.is_boot,
+                        status="needs_decryption",
+                        module_name=name,
+                        warnings=[*model.warnings, f"recovery attempted and failed: {exc}"],
+                        recovery=getattr(exc, "provenance", None),
+                    )
+                    continue
+
+                model = recovery_result.model
+                name = _module_name(model) or name
+                recovery_provenance = recovery_result.provenance
+                extracted = _safe_relative_target(output / "recovered", candidate.path)
+                _atomic_write_bytes(extracted, recovery_result.data)
+                _atomic_write_json(
+                    extracted.with_name(extracted.name + ".recovery.json"),
+                    asdict(recovery_provenance),
                 )
-                continue
 
             # Validate this module's loadable layout before it participates in
             # the global placement plan. This preserves secondary-module
@@ -218,6 +283,7 @@ def generate_game_project(
                     project_root=project_root,
                     model=model,
                     module_name=name,
+                    recovery=recovery_provenance,
                 )
             )
         except EngineUnavailableError:
@@ -231,6 +297,7 @@ def generate_game_project(
                 status="failed",
                 module_name=_module_name(model) if model is not None else None,
                 warnings=[str(exc)],
+                recovery=recovery_provenance,
             )
 
     placements = plan_module_placements(
@@ -280,7 +347,7 @@ def generate_game_project(
                 extracted_path=_relative_display(prepared.extracted, output),
                 executable_kind=candidate.executable_kind,
                 is_boot=candidate.is_boot,
-                status="analyzed",
+                status="analyzed_recovered" if prepared.recovery is not None else "analyzed",
                 module_name=prepared.module_name,
                 project_path=_relative_display(prepared.project_root, output),
                 function_count=len(disassembly.functions),
@@ -288,6 +355,7 @@ def generate_game_project(
                 reference_count=len(disassembly.references),
                 string_count=len(disassembly.strings),
                 warnings=[*prepared.model.warnings, *disassembly.warnings],
+                recovery=prepared.recovery,
                 **fields,
             )
             link_units.append(ModuleAnalysisInput(link_model, disassembly))
@@ -302,11 +370,13 @@ def generate_game_project(
                 status="failed",
                 module_name=prepared.module_name,
                 warnings=[str(exc)],
+                recovery=prepared.recovery,
                 **fields,
             )
 
     module_records = [records_by_path[candidate.path] for candidate in candidates]
     analyzed_count = sum(record.status == "analyzed" for record in module_records)
+    recovered_count = sum(record.status == "analyzed_recovered" for record in module_records)
     needs_decryption_count = sum(record.status == "needs_decryption" for record in module_records)
     failed_count = sum(record.status == "failed" for record in module_records)
 
@@ -348,6 +418,7 @@ def generate_game_project(
         analyzed_count=analyzed_count,
         needs_decryption_count=needs_decryption_count,
         failed_count=failed_count,
+        recovered_count=recovered_count,
         resource_count=resource_count,
         known_resource_count=known_resource_count,
         unknown_resource_count=resource_count - known_resource_count,
