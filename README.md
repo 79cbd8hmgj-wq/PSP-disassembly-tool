@@ -2,7 +2,7 @@
 
 `pspdisasm` is a PSP-focused game-image, executable-analysis, disassembly, decompilation, matching, and whole-game resource-analysis toolkit. It adds PSP-specific disc/container/PRX intelligence around the Decompollaborate ecosystem instead of combining upstream projects into one fork.
 
-## Current status: Phase 8C
+## Current status: Phase 8D
 
 The implemented pipeline now covers:
 
@@ -22,6 +22,7 @@ The implemented pipeline now covers:
 14. Local large-game workspaces with deterministic manifests, resumable whole-game analysis, bounded portable analysis packs, and tracked-content payload guards.
 15. An optional, pluggable retail-executable recovery layer: user-supplied external tools or pre-verified dumps can turn an encrypted `~PSP` container into a directly analyzable ELF/PRX, with strict verification and full hash provenance, before it re-enters the same analysis pipeline. No recovery/decryption capability is implemented in this repository.
 16. A general PSP runtime-intelligence subsystem: a from-scratch, bounded PPSSPP debugger client, a `RuntimeSession` abstraction for bounded breakpoint observation, tiered (never-fabricated) runtime module mapping, and a reconciliation layer that maps a runtime address back to the correct static module/function and records categorical evidence (corroborated/runtime_observed/runtime_verified/conflicting/unresolved) without erasing prior static conclusions. No PPSSPP implementation code is included; PPSSPP is driven entirely through its documented WebSocket debugger protocol.
+17. An automated decompile → build → match pipeline over the existing deterministic toolchain (m2c, a user-supplied compiler or build command, asm-differ): a resumable, content-hash-addressed per-function queue with bounded retries, append-only attempt provenance, never-regressing best-attempt selection, and a `BuildToolchain` abstraction over either an external compiler or a project's own build system. Not an AI/LLM source-rewriting loop — every step is the same subprocess-driven tool invocation the toolkit already used in Phases 4/5.
 
 ## Implemented phases
 
@@ -226,6 +227,17 @@ See [`docs/phase8b-retail-recovery.md`](docs/phase8b-retail-recovery.md) for the
 - `pspdisasm runtime observe|modules|reconcile` CLI commands; no full debugger shell.
 
 See [`docs/phase8c-runtime-intelligence.md`](docs/phase8c-runtime-intelligence.md) for the full architecture, address-domain model, module-mapping tiers, reconciliation algorithm, and what remains explicitly deferred (automatic HLE module enumeration beyond the capability probe, kernel-structure-based module mapping, and any multi-emulator/multi-build evidence fusion).
+
+### Phase 8D — automated decompile/build/match pipeline
+
+- `pspdisasm.decompile.queue.discover_functions()`: enumerates every function in every analyzed module's Splat project from data Phase 7/8A already produced; `enrich_with_runtime_evidence()` (Phase 8C) and `enrich_with_static_confidence()` (Phase 6A) attach optional context without ever replacing a static conclusion. `select_functions()` prioritizes deterministically (smallest-function-first, needs-work-first, full tiebreak) and `--function` bypasses ordering for direct dispatch or a forced retry.
+- `pspdisasm.decompile.toolchain.BuildToolchain`: a `Protocol` with two implementations — `ExternalCompilerToolchain` (invoke a user-supplied compiler directly) and `ProjectBuildCommandToolchain` (run the project's own build system, e.g. a Splat Makefile rule, via `shlex.split` + argument-array execution, never a shell). Distinguishing build failure from match failure (Phase 5's own `build_command=` path folds both into one error) is exactly why this exists as its own stage.
+- `pspdisasm.decompile.orchestrator.run_function()`: a bounded generate→build→match retry loop. Every attempt gets a **content-derived** id (sha256 of assembly + context + m2c identity + toolchain identity) — the entire cache-invalidation mechanism, no wall-clock timestamps. Attempts are appended to history and never deleted or overwritten; `select_best_attempt()` ranks exact-match > higher similarity > fewer diff rows > deterministic tiebreak, so a later worse attempt can never regress an already-achieved match.
+- Phase 5's synthesized reference object still lacks MIPS relocation records for functions with calls/global references; rather than fabricate potentially-incorrect relocations, Phase 8D threads the existing detection through as a structured `reference_lacks_relocations` flag on each attempt.
+- `workspace/decompilation/` persists per-function state (`functions/<module>/<function>/state.json`) and a `reports/match_status.csv` summary, atomically written with its own schema version independent of `ANALYSIS_SCHEMA_VERSION`/`RUNTIME_SCHEMA_VERSION`.
+- `pspdisasm decompile-workspace`/`pspdisasm match-status` CLI commands; not an AI/LLM source-rewriting loop — no step generates, edits, or judges C source with a language model.
+
+See [`docs/phase8d-decompile-pipeline.md`](docs/phase8d-decompile-pipeline.md) for the full attempt-identity model, bounded-retry design, `BuildToolchain` contract, best-attempt selection algorithm, and what remains explicitly deferred.
 
 ## Installation
 
@@ -508,6 +520,52 @@ PSPDISASM_ASM_DIFFER=/path/to/diff.py
 PSPDISASM_OBJDUMP=/path/to/psp-objdump
 ```
 
+### Automate the decompile/build/match pipeline
+
+With a direct external compiler:
+
+```bash
+pspdisasm decompile-workspace /path/to/game-workspace \
+  --m2c /path/to/m2c.py \
+  --compiler /path/to/psp-gcc --compiler-flag -O2 \
+  --asm-differ /path/to/diff.py --objdump /path/to/psp-objdump
+```
+
+Or the project's own build system:
+
+```bash
+pspdisasm decompile-workspace /path/to/game-workspace \
+  --m2c /path/to/m2c.py \
+  --toolchain-command "make {function}.o" --toolchain-output "build/{function}.o" \
+  --asm-differ /path/to/diff.py --objdump /path/to/psp-objdump
+```
+
+Narrow the queue and bound the run:
+
+```bash
+pspdisasm decompile-workspace /path/to/game-workspace \
+  --m2c /path/to/m2c.py --compiler /path/to/psp-gcc \
+  --asm-differ /path/to/diff.py --objdump /path/to/psp-objdump \
+  --module PSP_GAME/SYSDIR/EBOOT.BIN --below-match 90 --limit 20
+```
+
+Force a retry on one function regardless of its current status:
+
+```bash
+pspdisasm decompile-workspace /path/to/game-workspace \
+  --m2c /path/to/m2c.py --compiler /path/to/psp-gcc \
+  --asm-differ /path/to/diff.py --objdump /path/to/psp-objdump \
+  --function func_08812340 --force
+```
+
+Check progress without decompiling/building/matching anything:
+
+```bash
+pspdisasm match-status /path/to/game-workspace
+```
+
+`--compiler`/`--compiler-flag` (repeatable) and `--toolchain-command`/`--toolchain-output` are mutually exclusive `BuildToolchain` selections; the latter pair is required together. Every run persists per-function state immediately and regenerates `workspace/decompilation/reports/match_status.csv`. Each attempt's id is content-derived (assembly, context, m2c/toolchain identity) — an unchanged function is never redecompiled, and attempt history is never lost across runs.
+
 ## NID database formats
 
 ### JSON
@@ -614,6 +672,35 @@ from pspdisasm.model import RuntimeAddress, RuntimeAddressDomain
 
 `RuntimeSession(host=..., port=..., launch=LaunchSpec(...) | None)` is a context manager; `session.observe_breakpoint(address=RuntimeAddress(domain=RuntimeAddressDomain.RUNTIME.value, value=...), timeout=...)` returns a `RuntimeBreakpointObservation`. `build_runtime_module_map(session.transport, [HleModuleListSource(), UserProvidedModuleSource({...})])` tries tiers in order and never merges them. `reconcile_workspace()` and `reconcile_observation()` (in `pspdisasm.runtime.reconciliation`, alongside `StaticCandidate` and `ObservationGroup`) implement the address-domain-safe reconciliation algorithm. `pspdisasm.runtime.workspace` (`save_session_info`, `save_observations`, `save_module_map`, `save_reconciliation`, and their `load_*` counterparts) persists to `workspace/runtime/`.
 
+Phase 8D is a separate `pspdisasm.decompile` subpackage (not imported by `import pspdisasm` itself, for the same reason as `pspdisasm.runtime`):
+
+```python
+from pspdisasm.decompile import (
+    ExternalCompilerToolchain,
+    ProjectBuildCommandToolchain,
+    QueueFilters,
+    discover_functions,
+    run_and_persist,
+    select_functions,
+    write_match_status_report,
+)
+```
+
+```python
+functions = discover_functions(workspace_dir)
+selected = select_functions(functions, QueueFilters(below_match=90.0, limit=20))
+toolchain = ExternalCompilerToolchain("/path/to/psp-gcc", flags=["-O2"])
+for queued in selected:
+    state = run_and_persist(
+        workspace_dir, queued,
+        m2c_path="/path/to/m2c.py", toolchain=toolchain,
+        asm_differ_path="/path/to/diff.py", objdump_path="/path/to/psp-objdump",
+    )
+write_match_status_report(workspace_dir, discover_functions(workspace_dir))
+```
+
+`run_function()` (used internally by `run_and_persist()`) is available directly when a caller wants the resulting `FunctionDecompilationState` without persisting it. `compute_attempt_id()` and `select_best_attempt()` are exposed for callers building their own reporting on top of `attempt_history`.
+
 ## Resource-analysis safety model
 
 A signature or extension alone does not authorize arbitrary carving.
@@ -667,6 +754,10 @@ A signature or extension alone does not authorize arbitrary carving.
 - Phase 8C reconciliation compares one runtime observation against caller-supplied static candidates; it does not itself derive candidates from `game_analysis.json`/disassembly output automatically — `--static-candidates` (CLI) or the Python API's `static_candidates=` mapping is how those facts get supplied today.
 - No multi-session/multi-build runtime evidence fusion beyond per-(call site, target) observation counts; conflicting evidence from different PPSSPP builds or process runs is not distinguished from conflicting evidence within one session.
 - No emulator binary, game payload, save state, or PPSSPP debugger bundle is included in this repository or its test suite; Phase 8C's live-connection and live-launch paths are exercised only against a synthetic in-repo debugger fixture in CI.
+- Phase 8D's synthesized Phase 5 reference object still lacks MIPS relocation records for functions with calls/global references (unchanged from Phase 5); Phase 8D surfaces this as a structured `reference_lacks_relocations` flag per attempt rather than fabricating relocations.
+- Phase 8D's attempt identity does not include the matcher backend (asm-differ/objdump) — re-scoring an already-built object with a different asm-differ configuration is expected to be exercised through a distinct, filtered run, not treated as automatically voiding prior identical attempts.
+- Phase 8D's optional Phase 6A static-confidence enrichment is attached to persisted state but not yet consumed as a queue sort key.
+- No automated build-toolchain/compiler discovery — `ExternalCompilerToolchain`/`ProjectBuildCommandToolchain` both require an explicit path or command template.
 
 ## Development
 

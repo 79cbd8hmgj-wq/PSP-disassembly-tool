@@ -104,3 +104,35 @@ class RuntimeMappingError(RuntimeError):
     def __init__(self, message: str, *, evidence: object | None = None) -> None:
         super().__init__(message)
         self.evidence = evidence
+
+
+class BuildToolchainUnavailableError(RuntimeError):
+    """Raised when a Phase 8D build toolchain (compiler/build command) cannot be resolved."""
+
+    def __init__(self, message: str, *, attempt: object | None = None) -> None:
+        super().__init__(message)
+        self.attempt = attempt
+
+
+class BuildFailedError(RuntimeError):
+    """Raised when a resolved build toolchain ran but did not produce a usable object."""
+
+    def __init__(self, message: str, *, attempt: object | None = None) -> None:
+        super().__init__(message)
+        self.attempt = attempt
+
+
+class UnsupportedFunctionError(RuntimeError):
+    """Raised when a function is structurally unsuitable for decompilation (e.g. no instructions)."""
+
+    def __init__(self, message: str, *, attempt: object | None = None) -> None:
+        super().__init__(message)
+        self.attempt = attempt
+
+
+class ContextGenerationFailedError(RuntimeError):
+    """Raised when assembling m2c context/symbol inputs for a function fails safely."""
+
+    def __init__(self, message: str, *, attempt: object | None = None) -> None:
+        super().__init__(message)
+        self.attempt = attempt

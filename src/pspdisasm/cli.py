@@ -18,9 +18,21 @@ from .analysis_pack import (
 from .analyzer import analyze_file, model_to_dict
 from .disc import scan_game_disc
 from .disassembler import disassemble_file, result_to_dict
+from .decompile.orchestrator import DEFAULT_MAX_ATTEMPTS, DEFAULT_TIMEOUT_SECONDS, run_and_persist
+from .decompile.queue import (
+    QueueFilters,
+    discover_functions,
+    enrich_with_runtime_evidence,
+    enrich_with_static_confidence,
+    select_functions,
+)
+from .decompile.reporting import write_match_status_report
+from .decompile.toolchain import BuildToolchain, ExternalCompilerToolchain, ProjectBuildCommandToolchain
 from .decompiler import DEFAULT_M2C_TARGET, decompile_project_function
 from .errors import (
     AnalysisPackError,
+    BuildFailedError,
+    BuildToolchainUnavailableError,
     DecompilationError,
     DecompilerUnavailableError,
     DisassemblyError,
@@ -249,6 +261,42 @@ def _parser() -> argparse.ArgumentParser:
     match.add_argument("--section", default=".text", metavar="SECTION", help="Object section to compare (default: .text)")
     match.add_argument("--ignore-large-imms", action="store_true", help="Pass asm-differ's large-immediate normalization flag")
     match.add_argument("--timeout", type=float, default=120.0, metavar="SECONDS", help="Timeout for build and asm-differ commands (default: 120)")
+
+    decompile_workspace = sub.add_parser(
+        "decompile-workspace",
+        help="Phase 8D: run the automated decompile -> build -> match pipeline over a workspace's queued functions",
+    )
+    decompile_workspace.add_argument("workspace", type=Path)
+    decompile_workspace.add_argument("--module", metavar="LOGICAL_PATH", help="Restrict to one analyzed module")
+    decompile_workspace.add_argument(
+        "--function", metavar="SELECTOR", help="Restrict to (and force-retry) one function by name or address"
+    )
+    decompile_workspace.add_argument(
+        "--below-match", type=float, metavar="PERCENT", help="Only functions whose best match is below this percent"
+    )
+    decompile_workspace.add_argument("--unmatched-only", action="store_true", help="Skip functions already matched_exact")
+    decompile_workspace.add_argument("--limit", type=int, metavar="N", help="Process at most N functions")
+    decompile_workspace.add_argument(
+        "--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS, metavar="N",
+        help=f"Bounded retry variants per function (default: {DEFAULT_MAX_ATTEMPTS})",
+    )
+    decompile_workspace.add_argument("--force", action="store_true", help="Re-run an attempt even if its content-derived id was already tried")
+    decompile_workspace.add_argument("--m2c", type=Path, metavar="PATH", help="Path to m2c executable or m2c.py")
+    decompile_workspace.add_argument("--context", type=Path, action="append", default=[], metavar="FILE", help="Preprocessed C context file; may be repeated")
+    decompile_workspace.add_argument("--target", default=DEFAULT_M2C_TARGET, metavar="TARGET", help=f"m2c target triple (default: {DEFAULT_M2C_TARGET})")
+    decompile_workspace.add_argument("--compiler", type=Path, metavar="PATH", help="External compiler invoked directly per function (mutually exclusive with --toolchain-command)")
+    decompile_workspace.add_argument("--compiler-flag", action="append", default=[], metavar="FLAG", help="Flag passed to --compiler; may be repeated")
+    decompile_workspace.add_argument("--toolchain-command", metavar="TEMPLATE", help="Project build command template with a {function} placeholder, parsed without a shell (mutually exclusive with --compiler)")
+    decompile_workspace.add_argument("--toolchain-output", metavar="TEMPLATE", help="Output path template with a {function} placeholder, relative to the project directory; required with --toolchain-command")
+    decompile_workspace.add_argument("--asm-differ", type=Path, metavar="PATH", help="Path to asm-differ executable or diff.py")
+    decompile_workspace.add_argument("--objdump", type=Path, metavar="PATH", help="Path to a MIPS-capable objdump, preferably psp-objdump")
+    decompile_workspace.add_argument("--static-confidence", action="store_true", help="Compute Phase 6A function confidence for queue tie-breaking")
+    decompile_workspace.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, metavar="SECONDS", help=f"Timeout for build and asm-differ commands (default: {DEFAULT_TIMEOUT_SECONDS:g})")
+    decompile_workspace.add_argument("--json", metavar="PATH", help="Write per-function result JSON; use '-' for stdout")
+
+    match_status = sub.add_parser("match-status", help="Phase 8D: summarize a workspace's persisted decompilation/match state")
+    match_status.add_argument("workspace", type=Path)
+    match_status.add_argument("--json", metavar="PATH", help="Write the status summary JSON; use '-' for stdout")
 
     runtime = sub.add_parser("runtime", help="Phase 8C: capture and reconcile PPSSPP runtime evidence against a workspace")
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
@@ -559,6 +607,91 @@ def _run_runtime_command(args: argparse.Namespace) -> int:
     return 2
 
 
+def _build_decompile_toolchain(args: argparse.Namespace) -> BuildToolchain:
+    if args.toolchain_command:
+        if not args.toolchain_output:
+            raise ValueError("--toolchain-command requires --toolchain-output")
+        return ProjectBuildCommandToolchain(command_template=args.toolchain_command, output_template=args.toolchain_output)
+    if args.toolchain_output:
+        raise ValueError("--toolchain-output requires --toolchain-command")
+    return ExternalCompilerToolchain(args.compiler, flags=args.compiler_flag)
+
+
+def _run_decompile_workspace(args: argparse.Namespace) -> int:
+    functions = discover_functions(args.workspace)
+    functions = enrich_with_runtime_evidence(functions, args.workspace)
+    if args.static_confidence:
+        functions = enrich_with_static_confidence(functions, args.workspace)
+
+    filters = QueueFilters(
+        module=args.module,
+        function=args.function,
+        below_match=args.below_match,
+        unmatched_only=args.unmatched_only,
+        limit=args.limit,
+    )
+    selected = select_functions(functions, filters)
+    toolchain = _build_decompile_toolchain(args)
+
+    results = []
+    for queued in selected:
+        state = run_and_persist(
+            args.workspace,
+            queued,
+            m2c_path=args.m2c,
+            contexts=args.context,
+            target=args.target,
+            toolchain=toolchain,
+            asm_differ_path=args.asm_differ,
+            objdump_path=args.objdump,
+            max_attempts=args.max_attempts,
+            force=args.force,
+            timeout=args.timeout,
+        )
+        results.append(state)
+
+    report_path = write_match_status_report(args.workspace, discover_functions(args.workspace))
+
+    if not _write_json([asdict(state) for state in results], args.json):
+        print(f"Selected: {len(results)} function(s)")
+        for state in results:
+            match = f" ({state.best_match_percent:.2f}%)" if state.best_match_percent is not None else ""
+            print(f"  {state.module}::{state.function} @ 0x{state.address:08X} -> {state.status}{match}")
+        print(f"Report: {report_path}")
+    return 0
+
+
+def _run_match_status(args: argparse.Namespace) -> int:
+    functions = discover_functions(args.workspace)
+    counts: dict[str, int] = {}
+    for function in functions:
+        counts[function.state.status] = counts.get(function.state.status, 0) + 1
+    report_path = write_match_status_report(args.workspace, functions)
+
+    payload = {
+        "total": len(functions),
+        "counts": counts,
+        "report": str(report_path),
+        "functions": [
+            {
+                "module": function.module,
+                "function": function.function,
+                "address": function.address,
+                "status": function.state.status,
+                "attempts": function.state.attempts,
+                "best_match_percent": function.state.best_match_percent,
+            }
+            for function in functions
+        ],
+    }
+    if not _write_json(payload, args.json):
+        print(f"Functions: {len(functions)}")
+        for status, count in sorted(counts.items()):
+            print(f"  {status}: {count}")
+        print(f"Report: {report_path}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -778,6 +911,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Warning: {warning}")
             return 0
 
+        if args.command == "decompile-workspace":
+            return _run_decompile_workspace(args)
+
+        if args.command == "match-status":
+            return _run_match_status(args)
+
         if args.command == "runtime":
             return _run_runtime_command(args)
     except (
@@ -800,6 +939,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         DecompilationError,
         MatcherUnavailableError,
         MatchingError,
+        BuildToolchainUnavailableError,
+        BuildFailedError,
     ) as exc:
         print(f"pspdisasm: {exc}", file=sys.stderr)
         return 2
